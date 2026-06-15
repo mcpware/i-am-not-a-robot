@@ -229,6 +229,23 @@ img.addEventListener('click',function(ev){tap(ev.clientX,ev.clientY);});
 </body></html>`;
 }
 
+// Union bounding box (viewport coords) of the visible CAPTCHA widget(s) so we can
+// stream just that region: reCAPTCHA anchor (checkbox) + challenge (bframe),
+// hCaptcha, Cloudflare Turnstile. Returns {x,y,width,height} or null (full page).
+const CAPTCHA_CLIP_EXPR = `(function(){
+  function box(el){ if(!el) return null; var r=el.getBoundingClientRect(); if(r.width<8||r.height<8) return null;
+    var st=getComputedStyle(el); if(st.visibility==='hidden'||st.display==='none'||parseFloat(st.opacity||'1')<0.05) return null;
+    if(r.bottom<0||r.right<0||r.top>innerHeight||r.left>innerWidth) return null; return {x:r.left,y:r.top,w:r.width,h:r.height}; }
+  var sel=['iframe[src*="recaptcha/api2/anchor"]','iframe[src*="recaptcha/api2/bframe"]','.g-recaptcha','[data-sitekey]','iframe[src*="hcaptcha.com"]','iframe[title*="hCaptcha"]','.cf-turnstile','iframe[src*="challenges.cloudflare.com"]'];
+  var rects=[];
+  sel.forEach(function(s){ document.querySelectorAll(s).forEach(function(e){ var b=box(e); if(b)rects.push(b); var p=e.parentElement; if(p){var pb=box(p); if(pb&&pb.w<innerWidth*0.95)rects.push(pb);} }); });
+  if(!rects.length) return null;
+  var x0=Math.min.apply(null,rects.map(function(r){return r.x;})), y0=Math.min.apply(null,rects.map(function(r){return r.y;}));
+  var x1=Math.max.apply(null,rects.map(function(r){return r.x+r.w;})), y1=Math.max.apply(null,rects.map(function(r){return r.y+r.h;}));
+  var pad=10; x0=Math.max(0,x0-pad); y0=Math.max(0,y0-pad); x1=Math.min(innerWidth,x1+pad); y1=Math.min(innerHeight,y1+pad);
+  return {x:Math.round(x0),y:Math.round(y0),width:Math.round(x1-x0),height:Math.round(y1-y0)};
+})()`;
+
 // ---------------------------------------------------------------------------
 // Public tunnels. cloudflared (primary) streams WebSocket from a nearby edge =
 // low latency; ssh tunnels (localhost.run -> pinggy) are the zero-binary fallback.
@@ -392,6 +409,8 @@ class HumanRelay {
     this.wss = null;
     this.wsClients = new Set();
     this.lastFrame = null; // base64 JPEG of the most recent frame
+    this.clip = null; // current captcha bounding box (viewport coords); null = full page
+    this._capTimer = null;
     this.vp = { w: 360, h: 640 };
     this.token = null;
     this.relayUrl = null;
@@ -444,24 +463,12 @@ class HumanRelay {
     }
     this.log('state', 'viewport', this.vp);
 
-    this.cdp.on('Page.screencastFrame', async (p) => {
-      this.lastFrame = p.data;
-      const bin = Buffer.from(p.data, 'base64');
-      for (const ws of this.wsClients) {
-        if (ws.readyState === WebSocket.OPEN) { try { ws.send(bin); } catch { /* client gone */ } }
-      }
-      try { await this.cdp.send('Page.screencastFrameAck', { sessionId: p.sessionId }); } catch { /* race on stop */ }
-    });
-    // Cap frame size so the JPEG stays light over a phone tunnel (full-viewport
-    // frames felt laggy). Tap accuracy is unaffected (coords map to real viewport).
-    const FCAP = 700;
-    const fscale = Math.min(1, FCAP / Math.max(this.vp.w, this.vp.h));
-    const sw = Math.max(1, Math.round(this.vp.w * fscale));
-    const sh = Math.max(1, Math.round(this.vp.h * fscale));
-    await this.cdp.send('Page.startScreencast', {
-      format: 'jpeg', quality: 50, maxWidth: sw, maxHeight: sh, everyNthFrame: 1,
-    });
-    this.log('state', 'screencast started', { frame: sw + 'x' + sh });
+    // Stream just the CAPTCHA region (cropped) to the phone: clearer (a small
+    // region at high quality) and focused on the one thing the human needs — not
+    // the whole page/form the agent fills. Falls back to the full page if no
+    // captcha widget is found.
+    this._startCapture();
+    this.log('state', 'captcha capture started');
 
     this.token = crypto.randomBytes(12).toString('hex');
     await this._startHttp({ host, port });
@@ -551,6 +558,35 @@ class HumanRelay {
     });
   }
 
+  /** Poll-capture the captcha region and push it to the phone over WS. */
+  _startCapture() {
+    this._capTimer = setInterval(async () => {
+      if (!this.cdp || this.cdp.closed) return;
+      if (this.wsClients.size === 0 && this.lastFrame) return; // nobody watching
+      try {
+        const clip = await this._captchaClip();
+        this.clip = clip;
+        const params = { format: 'jpeg', quality: 80 };
+        if (clip) params.clip = { x: clip.x, y: clip.y, width: clip.width, height: clip.height, scale: 1 };
+        const shot = await this.cdp.send('Page.captureScreenshot', params);
+        if (shot && shot.data) {
+          this.lastFrame = shot.data;
+          const bin = Buffer.from(shot.data, 'base64');
+          for (const ws of this.wsClients) { if (ws.readyState === WebSocket.OPEN) { try { ws.send(bin); } catch { /* client gone */ } } }
+        }
+      } catch { /* transient: mid-navigation, detached frame, etc. */ }
+    }, 90);
+    if (this._capTimer.unref) this._capTimer.unref();
+  }
+
+  /** Bounding box (viewport coords) of the visible CAPTCHA widget(s), or null for full page. */
+  async _captchaClip() {
+    try {
+      const r = await this.cdp.send('Runtime.evaluate', { expression: CAPTCHA_CLIP_EXPR, returnByValue: true });
+      return r && r.result && r.result.value ? r.result.value : null;
+    } catch { return null; }
+  }
+
   async _tap(nx, ny) {
     nx = Number(nx);
     ny = Number(ny);
@@ -558,8 +594,10 @@ class HumanRelay {
       this.log('warn', 'tap ignored: coords out of [0,1]', { nx, ny });
       return;
     }
-    const x = Math.round(nx * this.vp.w);
-    const y = Math.round(ny * this.vp.h);
+    // Map the tap from the cropped image back to full-page coords via the clip.
+    const clip = this.clip || { x: 0, y: 0, width: this.vp.w, height: this.vp.h };
+    const x = Math.round(clip.x + nx * clip.width);
+    const y = Math.round(clip.y + ny * clip.height);
     this.log('state', 'tap relayed -> page', { x, y });
     await this.cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
     await this.cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
@@ -610,8 +648,8 @@ class HumanRelay {
   async stop() {
     this.log('entry', 'stop relay');
     if (this._killTimer) { clearTimeout(this._killTimer); this._killTimer = null; }
+    if (this._capTimer) { clearInterval(this._capTimer); this._capTimer = null; }
     try { if (this.tunnel) this.tunnel.close(); } catch { /* noop */ }
-    try { if (this.cdp) await this.cdp.send('Page.stopScreencast'); } catch { /* noop */ }
     for (const ws of this.wsClients) { try { ws.close(); } catch { /* noop */ } }
     this.wsClients.clear();
     try { if (this.wss) this.wss.close(); } catch { /* noop */ }
