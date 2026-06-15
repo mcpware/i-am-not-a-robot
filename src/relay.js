@@ -205,11 +205,12 @@ img{width:100%;display:block}
 <div class="wrap" id="wrap"><img id="v" alt="live page" src=""><div class="ring" id="ring"></div></div>
 <div id="hint">Tap exactly where you would on a computer. When the challenge clears, you can close this page.</div>
 <script>
-var img=document.getElementById('v'),dot=document.getElementById('dot'),ring=document.getElementById('ring'),wrap=document.getElementById('wrap');
-var base=location.pathname.replace(/\\/$/,'');
+var img=document.getElementById('v'),dot=document.getElementById('dot'),ring=document.getElementById('ring'),wrap=document.getElementById('wrap'),hint=document.getElementById('hint');
+var base=location.pathname.replace(/\\/$/,''),solved=false;
 var es=new EventSource(base+'/stream');
-es.onmessage=function(e){img.src='data:image/jpeg;base64,'+e.data;dot.className='dot live';};
-es.onerror=function(){dot.className='dot off';};
+es.onmessage=function(e){if(!solved){img.src='data:image/jpeg;base64,'+e.data;dot.className='dot live';}};
+es.addEventListener('solved',function(){solved=true;dot.className='dot live';img.style.opacity='0.35';hint.textContent='✓ Solved — the agent has it. You can close this page.';hint.style.color='#22c55e';hint.style.fontSize='15px';});
+es.onerror=function(){if(!solved)dot.className='dot off';};
 function tap(cx,cy){
   var ir=img.getBoundingClientRect();
   var nx=(cx-ir.left)/ir.width, ny=(cy-ir.top)/ir.height;
@@ -230,16 +231,21 @@ img.addEventListener('click',function(ev){tap(ev.clientX,ev.clientY);});
  * Anonymous + free; tries providers in order so it doesn't hinge on one host.
  * Power users can bypass this entirely by passing { host } (their own URL).
  */
+// Order matters: localhost.run is PRIMARY because it passes real phone-browser
+// traffic straight through. pinggy's free tier shows its own interstitial warning
+// page to browser User-Agents (verified), which breaks "open the link and solve";
+// it stays as a fallback only because it runs on :443 (reachable where :22 is
+// firewall-blocked), at the cost of the user having to click through that page.
 const TUNNEL_PROVIDERS = [
-  {
-    name: 'pinggy',
-    args: (port) => ['-o', 'StrictHostKeyChecking=accept-new', '-o', 'ServerAliveInterval=30', '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=15', '-p', '443', `-R0:localhost:${port}`, 'a.pinggy.io'],
-    re: /https:\/\/[a-z0-9-]+\.[a-z0-9.-]*pinggy[a-z-]*\.(?:link|online)/i,
-  },
   {
     name: 'localhost.run',
     args: (port) => ['-o', 'StrictHostKeyChecking=accept-new', '-o', 'ServerAliveInterval=30', '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=15', '-R', `80:localhost:${port}`, 'nokey@localhost.run'],
     re: /https:\/\/[a-z0-9-]+\.lhr\.life/i,
+  },
+  {
+    name: 'pinggy',
+    args: (port) => ['-o', 'StrictHostKeyChecking=accept-new', '-o', 'ServerAliveInterval=30', '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=15', '-p', '443', `-R0:localhost:${port}`, 'a.pinggy.io'],
+    re: /https:\/\/[a-z0-9-]+\.[a-z0-9.-]*pinggy[a-z-]*\.(?:link|online)/i,
   },
 ];
 
@@ -504,6 +510,9 @@ class HumanRelay {
         polls++;
         if (r && r.result && r.result.value === true) {
           this.log('exit', 'solve detected — passed', { polls });
+          // tell the phone it worked before we tear the relay down (avoids a "frozen/stuck" look)
+          for (const res of this.sse) { try { res.write('event: solved\ndata: 1\n\n'); } catch { /* client gone */ } }
+          await new Promise((r2) => setTimeout(r2, 250)); // let the success frame reach the phone
           return { passed: true };
         }
       } catch (e) {
