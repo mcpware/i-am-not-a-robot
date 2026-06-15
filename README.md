@@ -6,14 +6,16 @@ Your agent is running browser automation while you are on a bus. It hits a reCAP
 
 **This is a human-in-the-loop relay, not a solver.** It ships no auto-solve code and never tries to beat a CAPTCHA. A real person solves it. That is also why it does not rot every time Google ships a new challenge: there is no vision model to keep up to date.
 
+It is also **phone-native**. Other human-in-the-loop tools hand you a live-view URL to drive the whole browser at a desktop. human-gate sends just the CAPTCHA to your phone and you solve it with your thumb, from anywhere. The agent's browser stays put on its own machine and IP, so the token it earns is natively valid.
+
 ## How it works
 
 ```
 your agent (browser over CDP) hits a CAPTCHA
    └─ calls MCP tool: start_human_relay({ cdpUrl })
         ├─ connects to the browser over CDP (raw protocol, no Playwright dependency)
-        ├─ Page.startScreencast  → streams the challenge to a small web page
-        ├─ opens a public URL for that page (auto ssh tunnel, see below)
+        ├─ captures just the CAPTCHA widget and streams it over a WebSocket to a phone page
+        ├─ opens a fast public URL for that page (cloudflared, see below)
         └─ returns relayUrl
    └─ the agent posts the link in chat: "Solve this CAPTCHA: <relayUrl>"
         └─ you open it on your phone, see the live challenge, tap the tiles
@@ -64,15 +66,15 @@ Puppeteer and browser-use expose the same kind of endpoint. Anything that speaks
 
 ## Cross-network, zero setup
 
-The whole point of this tool is the times you are not at the computer, so the phone and the agent are usually on different networks. human-gate handles that itself. On `start_human_relay` it opens a public HTTPS URL using your machine's own `ssh` client, with no binary to download and no account. It tries pinggy first, then falls back to localhost.run. The tunnel closes when the relay stops.
+The whole point of this tool is the times you are not at the computer, so the phone and the agent are usually on different networks. human-gate handles that itself. On `start_human_relay` it opens a public HTTPS URL. By default it uses a [cloudflared](https://github.com/cloudflare/cloudflared) quick tunnel (auto-downloaded once, then cached): a nearby Cloudflare edge keeps the round-trip low (~50 ms in testing, vs ~180 ms for a single-server ssh tunnel) so tapping feels responsive, and it streams WebSocket cleanly. If cloudflared is unavailable it falls back to a zero-binary `ssh` tunnel (localhost.run, then pinggy). The tunnel closes when the relay stops.
 
-If your machine and phone happen to be on the same network (same wifi, or the same Tailscale tailnet), `relayUrls` also lists the LAN and tailnet URLs and you can use those instead. Power users can pass their own `{ host }` to skip the tunnel entirely.
+If your machine and phone are on the same network (same wifi, or the same Tailscale tailnet), `relayUrls` also lists the LAN and tailnet URLs, which are direct and fastest. Power users can pass their own `{ host }` to skip the tunnel entirely.
 
-The default leans on a free third-party tunnel host for convenience. This project hosts nothing, and you can always point it at your own.
+The public-tunnel default leans on a free third-party host for convenience. This project hosts nothing, and you can always point it at your own.
 
 ## Supported challenges
 
-Automatic pass detection covers the response token for reCAPTCHA v2/v3, hCaptcha, and Cloudflare Turnstile. The relay streams and forwards taps for any visual challenge, so a human can drive whatever is on screen. The automatic "it passed" signal is what is tied to those three widgets.
+human-gate crops the stream to just the CAPTCHA widget (the checkbox and its image challenge), so you see only what you act on, not the whole page the agent is filling. Detection covers reCAPTCHA v2/v3/Enterprise, hCaptcha, and Cloudflare Turnstile; an unrecognized widget falls back to streaming the full page. Automatic pass detection (the response token) is wired for those same widgets.
 
 ## Security and intended use
 
@@ -86,9 +88,9 @@ The package also ships `humanGate(page, { ... })`, a zero-dependency helper for 
 
 ## Status
 
-- MCP server with `start_human_relay` and `await_human_solve`: working, tested end to end.
-- Auto public tunnel (pinggy, then localhost.run): working.
-- `humanGate()` phone-push library for text/approve: working.
+- MCP server (`start_human_relay` + `await_human_solve`): working, verified end to end on a real phone (real reCAPTCHA image challenges, real tokens).
+- WebSocket transport, captcha-only crop, cloudflared fast tunnel with ssh fallback: working.
+- `humanGate()` phone-push library for text/approve (OTP, 2FA, confirm): working.
 
 ## License
 
