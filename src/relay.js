@@ -246,19 +246,18 @@ async function downloadFile(url, dest) {
 }
 
 /**
- * Poll until the public URL's DNS record propagates, or timeout. Uses dns.resolve4
- * (c-ares, queries DNS directly) rather than fetch/getaddrinfo, which would cache
- * the first NXDOMAIN miss and then keep failing even after the record appears.
+ * Wait until the public URL is reachable, or timeout. Critically, wait a few
+ * seconds BEFORE the first lookup: querying the hostname before its DNS record
+ * has propagated makes the system resolver negative-cache the miss, after which
+ * every retry keeps failing for the negative-TTL even once the record appears.
  */
-async function waitReachable(url, timeoutMs) {
-  const dns = require('dns').promises;
-  let host;
-  try { host = new URL(url).hostname; } catch { return false; }
+async function waitReachable(url, timeoutMs, initialDelayMs = 9000) {
+  await new Promise((r) => setTimeout(r, initialDelayMs));
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try { const addrs = await dns.resolve4(host); if (addrs && addrs.length) return true; }
-    catch { /* record not propagated yet */ }
-    await new Promise((r) => setTimeout(r, 1200));
+    try { const r = await fetch(url, { method: 'GET', redirect: 'manual' }); if (r.status) return true; }
+    catch { /* not propagated yet */ }
+    await new Promise((r) => setTimeout(r, 1500));
   }
   return false;
 }
