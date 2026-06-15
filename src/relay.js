@@ -48,8 +48,9 @@ function listIpv4() {
   const out = [];
   const ifaces = os.networkInterfaces();
   for (const name of Object.keys(ifaces)) {
+    if (/^(docker|veth|br-|virbr|cni|flannel)/i.test(name)) continue; // not reachable from a phone
     for (const net of ifaces[name] || []) {
-      if (net.family === 'IPv4' && !net.internal) out.push(net.address);
+      if (net.family === 'IPv4' && !net.internal && !/^169\.254\./.test(net.address)) out.push(net.address);
     }
   }
   const rank = (ip) => {
@@ -82,12 +83,13 @@ class CdpSession {
     this._id = 0;
     this._pending = new Map();
     this._handlers = new Map();
+    this.closed = false;
   }
 
   connect() {
     return new Promise((resolve, reject) => {
       this.log('external', 'CDP connecting', { wsUrl: this.wsUrl });
-      const ws = new WebSocket(this.wsUrl, { maxPayload: 256 * 1024 * 1024 });
+      const ws = new WebSocket(this.wsUrl, { maxPayload: 64 * 1024 * 1024 });
       this.ws = ws;
       let settled = false;
       ws.on('open', () => { settled = true; this.log('state', 'CDP ws open'); resolve(); });
@@ -96,7 +98,12 @@ class CdpSession {
         this.log('error', 'CDP ws error', err && err.message);
         if (!settled) { settled = true; reject(err); }
       });
-      ws.on('close', () => this.log('state', 'CDP ws closed'));
+      ws.on('close', () => {
+        this.closed = true;
+        this.log('state', 'CDP ws closed');
+        for (const { reject } of this._pending.values()) { try { reject(new Error('CDP socket closed')); } catch { /* noop */ } }
+        this._pending.clear();
+      });
     });
   }
 
@@ -142,33 +149,79 @@ class CdpSession {
 async function fetchTargets(cdpUrl) {
   const base = cdpUrl.replace(/\/+$/, '');
   const url = `${base}/json`;
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 8000);
   let res;
-  try { res = await fetch(url); }
+  try { res = await fetch(url, { redirect: 'manual', signal: ac.signal }); }
   catch (e) { throw new Error(`cannot reach CDP at ${url}: ${e.message}`); }
+  finally { clearTimeout(t); }
   if (!res.ok) throw new Error(`CDP ${url} returned HTTP ${res.status}`);
   return res.json();
 }
 
-/** The tiny phone page: a screencast <img> + tap-forwarding. Mobile-friendly. */
+/** Strip userinfo (token@host) from a URL before logging. */
+function redactUrl(u) {
+  try { const x = new URL(u); if (x.username || x.password) { x.username = ''; x.password = ''; return x.toString(); } return u; }
+  catch { return u; }
+}
+
+/**
+ * True if the CDP debugger ws is served on the same PORT as cdpUrl. Chrome always
+ * serves the page ws on the same port as the /json endpoint, so a port mismatch
+ * means the JSON pointed us elsewhere (SSRF signal) and we refuse. We deliberately
+ * do NOT compare hostnames: legitimate setups report a different host than you
+ * dialed (localhost vs 127.0.0.1, a container IP, an ssh-tunnelled remote Chrome).
+ */
+function sameCdpHost(cdpUrl, wsUrl) {
+  try {
+    return new URL(cdpUrl).port === new URL(wsUrl).port;
+  } catch { return false; }
+}
+
+/** The phone page: live screencast <img> + tap-forwarding. Mobile-polished, zero deps. */
 function renderPhonePage(title) {
-  return `<!doctype html><meta name=viewport content="width=device-width,initial-scale=1,user-scalable=no">
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  title = esc(title);
+  return `<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>human-gate</title>
-<body style="margin:0;background:#111;font-family:system-ui;color:#eee;text-align:center">
-<div style="padding:8px;font-size:13px;line-height:1.3">${title}</div>
-<img id=v alt="live page" style="width:100%;display:block;touch-action:manipulation" src="">
-<div id=s style="padding:8px;font-size:12px;color:#9ca3af">connecting…</div>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:#0b0b0f;color:#e8e8ea;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-tap-highlight-color:transparent}
+header{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:9px;padding:11px 13px;background:#15151c;border-bottom:1px solid #26262f;font-size:13px}
+.dot{width:9px;height:9px;border-radius:50%;background:#f59e0b;flex:0 0 auto;transition:background .3s}
+.dot.live{background:#22c55e}.dot.off{background:#ef4444}
+.wrap{position:relative;touch-action:manipulation}
+img{width:100%;display:block}
+#hint{padding:11px 14px;font-size:12px;color:#9aa0aa;text-align:center;line-height:1.45}
+.ring{position:absolute;width:34px;height:34px;margin:-17px 0 0 -17px;border:2px solid #22c55e;border-radius:50%;pointer-events:none;opacity:0}
+.ring.go{animation:rng .5s ease-out}
+@keyframes rng{0%{opacity:.9;transform:scale(.4)}100%{opacity:0;transform:scale(1.3)}}
+</style></head>
+<body>
+<header><span class="dot" id="dot"></span><span>${title}</span></header>
+<div class="wrap" id="wrap"><img id="v" alt="live page" src=""><div class="ring" id="ring"></div></div>
+<div id="hint">Tap exactly where you would on a computer. When the challenge clears, you can close this page.</div>
 <script>
-var img=document.getElementById('v'),s=document.getElementById('s');
+var img=document.getElementById('v'),dot=document.getElementById('dot'),ring=document.getElementById('ring'),wrap=document.getElementById('wrap');
 var base=location.pathname.replace(/\\/$/,'');
 var es=new EventSource(base+'/stream');
-es.onmessage=function(e){img.src='data:image/jpeg;base64,'+e.data;s.style.display='none';};
-es.onerror=function(){s.textContent='reconnecting…';s.style.display='block';};
-img.addEventListener('click',function(ev){
-  var r=img.getBoundingClientRect();
-  var nx=(ev.clientX-r.left)/r.width, ny=(ev.clientY-r.top)/r.height;
+es.onmessage=function(e){img.src='data:image/jpeg;base64,'+e.data;dot.className='dot live';};
+es.onerror=function(){dot.className='dot off';};
+function tap(cx,cy){
+  var ir=img.getBoundingClientRect();
+  var nx=(cx-ir.left)/ir.width, ny=(cy-ir.top)/ir.height;
+  if(nx<0||nx>1||ny<0||ny>1)return;
+  var wr=wrap.getBoundingClientRect();
+  ring.style.left=(cx-wr.left)+'px';ring.style.top=(cy-wr.top)+'px';
+  ring.classList.remove('go');void ring.offsetWidth;ring.classList.add('go');
   fetch(base+'/tap',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nx:nx,ny:ny})});
-});
-</script></body>`;
+}
+img.addEventListener('click',function(ev){tap(ev.clientX,ev.clientY);});
+</script>
+</body></html>`;
 }
 
 /**
@@ -181,7 +234,7 @@ const TUNNEL_PROVIDERS = [
   {
     name: 'pinggy',
     args: (port) => ['-o', 'StrictHostKeyChecking=accept-new', '-o', 'ServerAliveInterval=30', '-o', 'ExitOnForwardFailure=yes', '-o', 'ConnectTimeout=15', '-p', '443', `-R0:localhost:${port}`, 'a.pinggy.io'],
-    re: /https:\/\/[a-z0-9-]+\.[a-z0-9.-]*pinggy-free\.link/i,
+    re: /https:\/\/[a-z0-9-]+\.[a-z0-9.-]*pinggy[a-z-]*\.(?:link|online)/i,
   },
   {
     name: 'localhost.run',
@@ -212,6 +265,7 @@ class Tunnel {
         this.log('state', 'tunnel up', { provider: prov.name, url });
         return url;
       }
+      this.close(); // kill the failed provider's ssh before trying the next
     }
     this.log('warn', 'all tunnel providers failed — relay will be LAN-only');
     return null;
@@ -220,13 +274,19 @@ class Tunnel {
   _try(prov, port, timeoutMs) {
     return new Promise((resolve, reject) => {
       const proc = spawn('ssh', prov.args(port));
+      this.proc = proc; // assign immediately so close() can always kill it
       let buf = '';
       let settled = false;
       const finish = (fn, arg) => { if (settled) return; settled = true; clearTimeout(timer); fn(arg); };
       const onData = (d) => {
         buf += d.toString();
+        if (buf.length > 65536) buf = buf.slice(-4096); // bound memory on a long-lived tunnel
         const m = buf.match(prov.re);
-        if (m) { this.proc = proc; finish(resolve, m[0]); }
+        if (m) {
+          proc.stdout.removeListener('data', onData);
+          proc.stderr.removeListener('data', onData);
+          finish(resolve, m[0]);
+        }
       };
       proc.stdout.on('data', onData);
       proc.stderr.on('data', onData);
@@ -258,14 +318,15 @@ class HumanRelay {
     this.relayUrls = null;
     this.target = null;
     this.tunnel = null;
+    this._killTimer = null;
   }
 
   /**
    * Connect via CDP, start the screencast, and serve the phone relay page.
    * @returns {Promise<{relayUrl:string, relayUrls:string[], pageUrl:string, viewport:{w:number,h:number}}>}
    */
-  async start({ cdpUrl, targetUrl, host, port, tunnel } = {}) {
-    this.log('entry', 'start_human_relay', { cdpUrl, targetUrl });
+  async start({ cdpUrl, targetUrl, host, port, tunnel, maxLifetimeMs } = {}) {
+    this.log('entry', 'start_human_relay', { cdpUrl: redactUrl(cdpUrl), targetUrl });
     if (!cdpUrl) throw new Error('cdpUrl is required, e.g. http://localhost:9222');
     if (/^wss?:\/\//i.test(cdpUrl)) {
       throw new Error('pass the CDP HTTP endpoint (http://host:port), not a ws:// url');
@@ -276,8 +337,11 @@ class HumanRelay {
     this.log('state', 'targets fetched', { total: targets.length, pages: pages.length });
 
     let target = targetUrl ? pages.find((p) => (p.url || '').includes(targetUrl)) : null;
-    if (!target) target = pages[0];
+    if (!target) target = pages.find((p) => p.url && !/^(about:|chrome:|devtools:)/.test(p.url)) || pages[0];
     if (!target) throw new Error('no inspectable page target found at cdpUrl');
+    if (!sameCdpHost(cdpUrl, target.webSocketDebuggerUrl)) {
+      throw new Error('CDP debugger ws host does not match cdpUrl host (refusing to dial elsewhere)');
+    }
     this.target = target;
     this.log('state', 'target picked', { url: target.url });
 
@@ -326,26 +390,44 @@ class HumanRelay {
       }
     }
 
+    // Hard lifetime cap so an abandoned relay never lingers (tunnel/ws/http).
+    const maxMs = Number.isFinite(maxLifetimeMs) ? maxLifetimeMs : 15 * 60 * 1000;
+    this._killTimer = setTimeout(() => { this.log('warn', 'relay hit max lifetime — auto-stopping'); this.stop(); }, maxMs);
+    if (this._killTimer.unref) this._killTimer.unref();
+
     this.log('exit', 'relay live', { relayUrl: this.relayUrl, tunnel: this.tunnel ? this.tunnel.provider : 'none' });
     return { relayUrl: this.relayUrl, relayUrls: this.relayUrls, pageUrl: target.url, viewport: this.vp };
   }
 
   _startHttp({ host, port } = {}) {
     return new Promise((resolve, reject) => {
-      const prefix = `/r/${this.token}`;
+      const tokenBuf = Buffer.from(this.token);
+      const prefix = `/r/${this.token}`; // used to build the public relay URLs below
       const server = http.createServer((req, res) => {
-        const path = (req.url || '').split('?')[0];
-        if (!path.startsWith(prefix)) { this.log('warn', 'rejected bad/expired token path', { path }); res.writeHead(404).end('not found'); return; }
-        const sub = path.slice(prefix.length);
+        const reqPath = (req.url || '').split('?')[0];
+        const parts = reqPath.split('/'); // ['', 'r', <token>, ...rest]
+        const given = parts[2] || '';
+        const tokOk = parts[1] === 'r' && given.length === this.token.length &&
+          crypto.timingSafeEqual(Buffer.from(given), tokenBuf);
+        if (!tokOk) { this.log('warn', 'rejected request with bad/expired token'); res.writeHead(404).end('not found'); return; }
+        const sub = '/' + parts.slice(3).join('/'); // '/', '/stream', or '/tap'
+        const method = req.method || 'GET';
 
-        if (sub === '' || sub === '/') {
+        if (sub === '/') {
+          if (method !== 'GET') { res.writeHead(405).end('method not allowed'); return; }
           this.log('debug', 'phone opened relay page');
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(renderPhonePage('human-gate — solve the CAPTCHA with your finger'));
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Content-Security-Policy': "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'",
+            'X-Content-Type-Options': 'nosniff',
+            'Referrer-Policy': 'no-referrer',
+          });
+          res.end(renderPhonePage('human-gate · solve the CAPTCHA'));
           return;
         }
         if (sub === '/stream') {
-          res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+          if (method !== 'GET') { res.writeHead(405).end('method not allowed'); return; }
+          res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Content-Type-Options': 'nosniff' });
           res.write('retry: 1000\n\n');
           if (this.lastFrame) res.write(`data: ${this.lastFrame}\n\n`);
           this.sse.add(res);
@@ -353,7 +435,7 @@ class HumanRelay {
           req.on('close', () => { this.sse.delete(res); this.log('state', 'SSE client left', { clients: this.sse.size }); });
           return;
         }
-        if (sub === '/tap' && req.method === 'POST') {
+        if (sub === '/tap' && method === 'POST') {
           let b = '';
           req.on('data', (c) => { b += c; if (b.length > 1e5) req.destroy(); });
           req.on('end', async () => {
@@ -379,6 +461,12 @@ class HumanRelay {
   }
 
   async _tap(nx, ny) {
+    nx = Number(nx);
+    ny = Number(ny);
+    if (!Number.isFinite(nx) || !Number.isFinite(ny) || nx < 0 || nx > 1 || ny < 0 || ny > 1) {
+      this.log('warn', 'tap ignored: coords out of [0,1]', { nx, ny });
+      return;
+    }
     const x = Math.round(nx * this.vp.w);
     const y = Math.round(ny * this.vp.h);
     this.log('state', 'tap relayed -> page', { x, y });
@@ -395,14 +483,22 @@ class HumanRelay {
   async awaitSolve({ timeoutMs = 300000, pollMs = 1500 } = {}) {
     this.log('entry', 'await_human_solve', { timeoutMs, pollMs });
     if (!this.cdp) throw new Error('no active relay; call start_human_relay first');
+    // Pass = the CAPTCHA's response token is present in the page. Covers the
+    // three common in-page widgets: reCAPTCHA v2/v3, hCaptcha, Cloudflare Turnstile.
     const expr =
-      "(function(){try{var t=document.querySelector('textarea[id^=\"g-recaptcha-response\"]');" +
-      "var tok=t?t.value:'';" +
-      "if(!tok&&typeof grecaptcha!=='undefined'&&grecaptcha.getResponse){try{tok=grecaptcha.getResponse();}catch(e){}}" +
-      'return !!(tok&&tok.length>0);}catch(e){return false;}})()';
+      '(function(){try{' +
+      'function v(s){var e=document.querySelector(s);return e&&e.value?e.value.length:0;}' +
+      'var n=0;' +
+      "n+=v('textarea[id^=\"g-recaptcha-response\"]');" +
+      "n+=v('textarea[name=\"h-captcha-response\"]');" +
+      "n+=v('input[name=\"cf-turnstile-response\"]');" +
+      "if(!n&&typeof grecaptcha!=='undefined'&&grecaptcha.getResponse){try{n+=(grecaptcha.getResponse()||'').length;}catch(e){}}" +
+      "if(!n&&typeof hcaptcha!=='undefined'&&hcaptcha.getResponse){try{n+=(hcaptcha.getResponse()||'').length;}catch(e){}}" +
+      'return n>0;}catch(e){return false;}})()';
     const deadline = Date.now() + timeoutMs;
     let polls = 0;
     while (Date.now() < deadline) {
+      if (this.cdp.closed) { this.log('error', 'CDP connection dropped — stopping poll'); return { passed: false, reason: 'cdp_closed' }; }
       try {
         const r = await this.cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
         polls++;
@@ -416,11 +512,12 @@ class HumanRelay {
       await new Promise((r) => setTimeout(r, pollMs));
     }
     this.log('exit', 'timed out waiting for human — not passed', { polls });
-    return { passed: false };
+    return { passed: false, reason: 'timeout' };
   }
 
   async stop() {
     this.log('entry', 'stop relay');
+    if (this._killTimer) { clearTimeout(this._killTimer); this._killTimer = null; }
     try { if (this.tunnel) this.tunnel.close(); } catch { /* noop */ }
     try { if (this.cdp) await this.cdp.send('Page.stopScreencast'); } catch { /* noop */ }
     for (const res of this.sse) { try { res.end(); } catch { /* noop */ } }

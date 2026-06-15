@@ -64,6 +64,7 @@ server.registerTool(
         `(streaming page: ${out.pageUrl}). When they finish, call await_human_solve.`;
       return { content: [{ type: 'text', text }], structuredContent: { relayUrl: out.relayUrl, relayUrls: out.relayUrls, pageUrl: out.pageUrl } };
     } catch (e) {
+      if (relay) { await relay.stop().catch(() => {}); relay = null; }
       return { isError: true, content: [{ type: 'text', text: `start_human_relay failed: ${e.message}` }] };
     }
   }
@@ -84,14 +85,19 @@ server.registerTool(
   },
   async ({ timeoutMs }) => {
     try {
-      if (!relay) {
+      const r = relay; // capture: a concurrent start_human_relay may swap the singleton
+      if (!r) {
         return { isError: true, content: [{ type: 'text', text: 'no active relay; call start_human_relay first' }] };
       }
-      const out = await relay.awaitSolve({ timeoutMs: timeoutMs || 300000 });
-      if (out.passed) { await relay.stop().catch(() => {}); relay = null; }
-      const text = out.passed
-        ? 'passed: the human solved the CAPTCHA and the relay is closed. Continue the task.'
-        : 'not passed: timed out waiting for the human. The relay is still live — call await_human_solve again, or tell the user to open the link.';
+      const out = await r.awaitSolve({ timeoutMs: timeoutMs || 300000 });
+      if (out.passed || out.reason === 'cdp_closed') {
+        await r.stop().catch(() => {});
+        if (relay === r) relay = null; // don't null a newer relay that already replaced us
+      }
+      let text;
+      if (out.passed) text = 'passed: the human solved the CAPTCHA and the relay is closed. Continue the task.';
+      else if (out.reason === 'cdp_closed') text = 'failed: the browser/CDP connection dropped, so the relay is closed. Re-attach to the browser and call start_human_relay again if you still need a human.';
+      else text = 'not passed: timed out waiting for the human. The relay is still live — call await_human_solve again, or tell the user to open the link.';
       return { content: [{ type: 'text', text }], structuredContent: { passed: out.passed } };
     } catch (e) {
       return { isError: true, content: [{ type: 'text', text: `await_human_solve failed: ${e.message}` }] };
@@ -102,13 +108,16 @@ server.registerTool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error('[human-gate] MCP server ready (stdio) — tools: start_human_relay, await_human_solve');
+  if (process.env.HUMAN_GATE_QUIET !== '1') {
+    console.error('[human-gate] MCP server ready (stdio) — tools: start_human_relay, await_human_solve');
+  }
 }
 
 // Tear down the relay (and its tunnel) if the client disconnects / kills us.
-function shutdown() { try { if (relay) relay.stop(); } catch { /* noop */ } }
-process.on('SIGTERM', () => { shutdown(); setTimeout(() => process.exit(0), 100); });
-process.on('SIGINT', () => { shutdown(); setTimeout(() => process.exit(0), 100); });
+async function shutdown() { try { if (relay) await relay.stop(); } catch { /* noop */ } }
+const onSignal = () => { shutdown().finally(() => process.exit(0)); };
+process.on('SIGTERM', onSignal);
+process.on('SIGINT', onSignal);
 
 main().catch((e) => {
   console.error('[human-gate] fatal:', e);

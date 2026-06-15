@@ -1,7 +1,7 @@
 {
   "name": "human-gate",
   "version": "0.1.0",
-  "description": "The missing input() for headless agents. Pause any Playwright/Puppeteer agent at a step only a human can do (CAPTCHA, OTP, 2FA, approve/reject), push a screenshot to your phone, resume on your tap. Bring your own browser, no cloud lock-in.",
+  "description": "Hand an in-page CAPTCHA from your AI browser agent to a real human on their phone over CDP. They solve it with a finger and the agent resumes. MCP server, bring your own browser, no cloud lock-in. A human-in-the-loop relay, not a CAPTCHA solver.",
   "type": "commonjs",
   "main": "src/index.js",
   "exports": {
@@ -13,6 +13,7 @@
     "LICENSE"
   ],
   "scripts": {
+    "test": "node src/selftest.js",
     "example:cdp": "node examples/captcha-demo.js",
     "selftest": "node src/selftest.js",
     "mcp": "node src/mcp-server.js",
@@ -20,16 +21,25 @@
     "mcp:tunnel-e2e": "node test/tunnel-e2e.js"
   },
   "bin": {
+    "human-gate": "src/mcp-server.js",
     "human-gate-mcp": "src/mcp-server.js"
   },
   "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "cdp",
     "playwright",
     "puppeteer",
+    "browser-use",
     "human-in-the-loop",
     "hitl",
     "ai-agent",
     "browser-agent",
     "captcha",
+    "recaptcha",
+    "hcaptcha",
+    "turnstile",
+    "screencast",
     "otp",
     "2fa",
     "approval",

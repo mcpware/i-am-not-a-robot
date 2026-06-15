@@ -1,105 +1,97 @@
 # human-gate
 
-**The missing `input()` for headless agents.**
+Hand an in-page CAPTCHA from your AI browser agent to a real human on their phone. They solve it with a finger, and the agent picks up where it left off.
 
-Your AI browser agent is running while you're on a bus. It hits a step only a human can do — a CAPTCHA, a one-time code, a "confirm this purchase", an ambiguous form field. Today it either dies waiting for you to get back to a computer, or you reach for a bulk CAPTCHA-solving service built for scraping.
+Your agent is running browser automation while you are on a bus. It hits a reCAPTCHA. Today that either stalls until you get back to a computer, or you wire in a bulk CAPTCHA-solving service built for scraping. `human-gate` does neither. It streams the live browser page to your phone, forwards your taps back into the same browser session, and resumes the moment the challenge clears.
 
-`human-gate` does the third thing: it **pauses the agent, pushes a screenshot to your phone, and resumes the moment you tap one answer.**
+**This is a human-in-the-loop relay, not a solver.** It ships no auto-solve code and never tries to beat a CAPTCHA. A real person solves it. That is also why it does not rot every time Google ships a new challenge: there is no vision model to keep up to date.
 
-```js
-const { humanGate } = require('human-gate');
+## How it works
 
-const otp = await humanGate(page, {
-  prompt: 'Login needs the OTP that was just texted to you. Type it.',
-  expect: 'text',
-  notify: { topic: 'my-agent-7f3a' },   // ntfy topic on your phone
-});
-await page.fill('#otp', otp);           // ...the agent carries on.
+```
+your agent (browser over CDP) hits a CAPTCHA
+   └─ calls MCP tool: start_human_relay({ cdpUrl })
+        ├─ connects to the browser over CDP (raw protocol, no Playwright dependency)
+        ├─ Page.startScreencast  → streams the challenge to a small web page
+        ├─ opens a public URL for that page (auto ssh tunnel, see below)
+        └─ returns relayUrl
+   └─ the agent posts the link in chat: "Solve this CAPTCHA: <relayUrl>"
+        └─ you open it on your phone, see the live challenge, tap the tiles
+             └─ each tap → Input.dispatchMouseEvent → the real browser
+   └─ the agent calls await_human_solve(), which polls until the token appears
+   └─ passed: true → the agent continues
 ```
 
-That's it. `page` is **your own** Playwright or Puppeteer page. No cloud session, no platform to migrate into.
-
-## Why this exists (and what it is not)
-
-Human-handoff for browser agents already exists — but in one shape: **"open a live-view URL and take over the whole browser yourself, at a desktop."** Browserbase, Browserless, Cloudflare Browser Run, and Amazon Nova Act all ship that. It's good, but it's **cloud-locked** and assumes you're sitting at a computer ready to drive.
-
-`human-gate` ships the other shape:
-
-1. **Bring your own browser — zero cloud lock-in.** It runs on the Playwright/Puppeteer page you already control, anywhere: your laptop, a VPS, an air-gapped box.
-2. **Phone-native answer, not browser-takeover.** A push notification with a screenshot and one thing to do — type the code, tap Approve. You can be anywhere. You never open a browser session.
-3. **One gate, every blocker.** CAPTCHA, OTP, 2FA, ambiguous field, approve/reject — one primitive, framework-agnostic (browser-use, LangGraph, raw Playwright, a cron script).
-
-**This is not a CAPTCHA solver.** It does not break CAPTCHAs and ships no auto-solve code path. It relays the step to a real human — which is also why it doesn't rot every time Google ships a new challenge. Use it for automation **you are authorized to run** (your own accounts and tasks).
+The relay speaks raw CDP, the protocol that Playwright, Puppeteer, and browser-use all sit on top of. So the only thing human-gate needs from your agent is one CDP endpoint. It does not care which framework drew the browser.
 
 ## Install
 
+As an MCP server, which is the main way to use it. For Claude Code:
+
 ```bash
-npm i human-gate
+claude mcp add human-gate -- npx -y human-gate
 ```
 
-Node >= 18. Zero runtime dependencies. You bring Playwright or Puppeteer; the phone side is just the free [ntfy](https://ntfy.sh) app (or print the link and open it yourself).
+For any other MCP client, point it at the same command:
 
-## Usage
+```json
+{ "mcpServers": { "human-gate": { "command": "npx", "args": ["-y", "human-gate"] } } }
+```
+
+Node >= 18. Runtime dependencies: `ws` and `@modelcontextprotocol/sdk`.
+
+## The two tools
+
+**`start_human_relay({ cdpUrl, targetUrl? }) -> { relayUrl, relayUrls, pageUrl }`**
+Connects to the agent's browser, starts the screencast, opens a public URL, and returns it. The agent posts `relayUrl` to you in chat. `targetUrl` is an optional substring to pick which page holds the CAPTCHA.
+
+**`await_human_solve({ timeoutMs? }) -> { passed }`**
+Polls until the CAPTCHA token shows up in the page (the challenge was accepted), or until timeout. The agent calls it after you open the link.
+
+Your agent decides when to call these from their tool descriptions. A prompt like "if you hit a CAPTCHA you cannot solve, use human-gate to ask me" is enough.
+
+## Bring your own browser
+
+human-gate attaches over CDP, so your browser runs wherever you want: a laptop, a VPS, a container. Expose a CDP endpoint and pass its URL.
 
 ```js
-const { humanGate } = require('human-gate');
-
-// 1) Text answer (OTP, CAPTCHA word, a value to fill)
-const code = await humanGate(page, {
-  prompt: 'Type the 6-digit code',
-  expect: 'text',
-  notify: { topic: 'my-agent-7f3a' },
-});
-
-// 2) Approve / reject decision
-const ok = await humanGate(page, {
-  prompt: 'Approve this $42 purchase?',
-  expect: 'approve',
-  capture: '#cart-summary',         // screenshot just one element
-  notify: { topic: 'my-agent-7f3a' },
-});
-if (!ok) throw new Error('human rejected');
+// Playwright: launch Chromium with a CDP port, then hand the URL to human-gate
+const browser = await chromium.launch({ args: ['--remote-debugging-port=9222'] });
+// cdpUrl = "http://localhost:9222"
 ```
 
-### Options
+Puppeteer and browser-use expose the same kind of endpoint. Anything that speaks CDP works. Screenshot-only computer-use agents, which have no CDP attach point, are out of scope.
 
-| option | default | meaning |
-|---|---|---|
-| `prompt` | — | what to ask the human |
-| `expect` | `'text'` | `'text'` returns a string; `'approve'` returns a boolean |
-| `capture` | `'viewport'` | `'viewport'`, `'fullpage'`, or a CSS selector to screenshot |
-| `notify` | — | `{ topic, server?, title?, priority? }` for ntfy. Omit to print the link |
-| `host` | auto LAN IP | host/IP your phone uses to reach the relay |
-| `port` | `0` | relay port (0 = ephemeral) |
-| `timeoutMs` | `300000` | how long to wait for the human |
-| `onReady(url)` | — | callback with the live relay URL (logging / custom relay / tests) |
-| `log` | `true` | debug logging to stderr (`HUMAN_GATE_QUIET=1` also silences it) |
+## Cross-network, zero setup
 
-### How it works
+The whole point of this tool is the times you are not at the computer, so the phone and the agent are usually on different networks. human-gate handles that itself. On `start_human_relay` it opens a public HTTPS URL using your machine's own `ssh` client, with no binary to download and no account. It tries pinggy first, then falls back to localhost.run. The tunnel closes when the relay stops.
 
-1. Screenshot the current page (or one element).
-2. Start a tiny one-time-token HTTP relay (Node built-ins only — no Express).
-3. Push the link to your phone via ntfy.
-4. You open it, see the screenshot, type/tap one answer.
-5. The promise resolves with your answer; the relay shuts down.
+If your machine and phone happen to be on the same network (same wifi, or the same Tailscale tailnet), `relayUrls` also lists the LAN and tailnet URLs and you can use those instead. Power users can pass their own `{ host }` to skip the tunnel entirely.
 
-The relay listens on your LAN by default. For a phone off your network, point `host` at a tunnel (e.g. `cloudflared`, `tailscale`) — not bundled, your call.
+The default leans on a free third-party tunnel host for convenience. This project hosts nothing, and you can always point it at your own.
 
-## Self-test (no browser/phone needed)
+## Supported challenges
 
-```bash
-npm run selftest
-```
+Automatic pass detection covers the response token for reCAPTCHA v2/v3, hCaptcha, and Cloudflare Turnstile. The relay streams and forwards taps for any visual challenge, so a human can drive whatever is on screen. The automatic "it passed" signal is what is tied to those three widgets.
 
-Runs the full pause → answer → resume loop against a fake page for both `text` and `approve` modes, plus the one-time-token guard.
+## Security and intended use
 
-## Roadmap
+- The relay URL carries a 96-bit random token in its path. Requests without it get a 404.
+- The default is your own browser on your own machine. While a relay is open, its traffic routes through the tunnel host; nothing else leaves your machine.
+- Use it for automation you are authorized to run, on your own accounts and tasks. It keeps a human in the loop and is single-user by design. It is not built for bulk use or for solving CAPTCHAs on someone else's behalf at scale.
 
-- **P0 (now):** `humanGate()` + ntfy + text/approve, local relay. ✅
-- **P1:** Telegram + Pushover adapters.
-- **P2:** `live` mode — stream the browser to your phone (CDP screencast) and forward your taps, so you can operate an actual CAPTCHA challenge remotely.
-- **P3:** timeout/retry policies, Puppeteer adapter parity, self-host ntfy guide, TypeScript types.
+## Also included: a phone-push gate for non-CAPTCHA steps
+
+The package also ships `humanGate(page, { ... })`, a zero-dependency helper for the simpler case where the answer is text or a yes/no: an OTP code, a 2FA prompt, "approve this purchase". It screenshots the page, pushes a link to your phone over [ntfy](https://ntfy.sh), and resumes on your reply. See `examples/otp-demo.js`.
+
+## Status
+
+- MCP server with `start_human_relay` and `await_human_solve`: working, tested end to end.
+- Auto public tunnel (pinggy, then localhost.run): working.
+- `humanGate()` phone-push library for text/approve: working.
 
 ## License
 
 MIT © Nicole Leung
+
+If human-gate saves you a trip back to the keyboard, a star helps other people find it.

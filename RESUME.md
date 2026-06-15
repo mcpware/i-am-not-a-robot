@@ -3,40 +3,47 @@
 更新：2026-06-15
 
 ## 一句：而家喺邊
-窄版（agent 撞 **in-page CAPTCHA** → 貼 link → 用戶 **mobile chat** 真手指 solve → CDP relay → Google 收貨 → agent resume）。**真人解 = 合法（唔係 solver）。**
-**M1（MCP server）+ M2（自動 public tunnel）都完成 + E2E 全綠。** 任何用戶裝完即跨網絡用，零 setup。
+窄版 in-page CAPTCHA 電話 relay（agent 撞 CAPTCHA → 貼 link → 用戶 mobile chat 真手指 solve → CDP relay → token 收貨 → agent resume）。**真人解 = 合法（唔係 solver）。**
+**M1+M2+M3 全部完成、過咗兩輪獨立 Opus review、QA 全綠 = release-ready。** 只差：①真機測（要 Nicole 部電話）②正式 publish（不可逆，等 Nicole go）。
 
-## ✅ 已驗證（唔使再證）
-- `src/index.js` P0 `humanGate()`（text/approve）+ ntfy + `npm run selftest` → **3/3 綠（今次 session re-confirm，無 regression）**。
-- `experiments/relay-poc.mjs`：2026-06-15 Nicole 真手指 solve reCAPTCHA demo → aria-checked=true（PASSED），25 relay tap，無 bot-block。機制已證。
-- **M1 MCP server**（`src/relay.js` raw CDP over `ws` 零 playwright；`src/mcp-server.js` 官方 SDK，tool：`start_human_relay`/`await_human_solve`）：
-  - `test/mcp-e2e.js`（本地、tunnel off）→ **7/7 綠，連跑兩次 idempotent**。覆蓋 tools/list、start→relayUrl、relay HTML、SSE screencast frame、tap forward、await timeout=false、inject token→passed=true。
-- **M2 自動 public tunnel**（`src/relay.js` 的 `Tunnel` class，零 binary，用機器本身 `ssh`）：
-  - 先測過 SSE+tap 過唔過到 tunnel：pinggy（`ssh -p443 -R0:localhost:PORT a.pinggy.io`）**SSE status 200 / 3 frames / tap 200 全過**。
-  - `test/tunnel-e2e.js`（經真 pinggy 公網）→ **4/4 綠**：start 自動開 tunnel→`https://…pinggy-free.link/r/<token>/`、relay 頁過公網、真 screencast frame 過 tunnel、tap 過 tunnel。
-  - robustness：**pinggy(:443) + localhost.run(:22) 兩個免費 serverless provider 都 live 測過 SSE+tap 過到**，primary 失敗自動 fallback；LAN/Tailscale 仍做候選（`relayUrls` 排序 public→LAN→tailnet）；`stop()`/SIGTERM kill tunnel（**實測無 orphan ssh**）；`{host}` override 可 bypass tunnel（own-it 逃生門）。
-  - ⚠️ 個別 provider 都驗證過，但「primary 失敗→fallback」嘅自動切換 loop 係 code-reviewed、未 force-fail pinggy 實測切換。
-  - 跑：`npm run mcp`（起 server）/ `npm run mcp:e2e`（本地）/ `npm run mcp:tunnel-e2e`（公網，需 :9222）。
+## ✅ 已驗證（QA 全綠，今次 session 跑過）
+- P0 `humanGate()`（text/approve + ntfy）：`npm run selftest` → **3/3**。
+- 核心 MCP E2E（`npm run mcp:e2e`，本地 tunnel off）：**7/7，idempotent**。
+- 公網 tunnel E2E（`npm run mcp:tunnel-e2e`，經真 pinggy）：**4/4**（public URL、relay 頁、真 screencast frame、tap 全部過公網）。
+- 兩個免費 serverless tunnel provider（pinggy:443 / localhost.run:22）都 live 測過 SSE+tap。
+- Security 加固實測：bad token→404、CSP/nosniff、method-guard→405、tap server 端 clamp、double-stop/restart 冪等、**無 orphan ssh**。
+- 零 playwright（raw CDP over `ws`）、deps 淨 `ws` + `@modelcontextprotocol/sdk`。
 
-## 🧩 架構決定（lightness research 結論）
-- 架構本身已最 light（screencast-relay irreducible：reCAPTCHA token 綁 session）。真正「更 light」= 同架構但減 npm 重量。
-- **掟走 playwright → raw CDP over `ws`**。兼容性嚟自「連 CDP」（Playwright/Puppeteer/browser-use 全部 expose CDP），唔嚟自用唔用 playwright。
-- **Nicole 拍板：robust > 字面 zero-dep**。WebSocket 用 `ws`（跨 OS 最穩、任何 Node 18+，唔使 flag）；MCP 用官方 SDK。runtime deps = `ws` + `@modelcontextprotocol/sdk`。
-- **跨網絡係核心，唔係 M2 nice-to-have**（同 wifi 你人就喺電腦邊，根本唔使呢 tool）。**Tailscale 唔係產品答案**（叫用戶特登裝 = 多嚿魚）→ human-gate **自己開 zero-binary ssh tunnel** 俾所有人，zero setup。
-- LAN IP 揀法：private LAN（192.168/10/172.16）優先，Tailscale CGNAT 排後做候選。
+## 🧩 形態 + 架構決定
+- MCP stdio server（npm `human-gate`，`npx human-gate` / `claude mcp add`）。唯一 integration 點 = 一條 CDP endpoint。
+- **掟走 playwright → raw CDP over `ws`**；robust > 字面 zero-dep（Nicole 拍板）；MCP 用官方 SDK。
+- 兩個 tool：`start_human_relay({cdpUrl,targetUrl?})→{relayUrl,relayUrls,pageUrl}`、`await_human_solve({timeoutMs?})→{passed}`。
+- **跨網絡 = 核心**（同 wifi 你人就喺電腦邊，唔使呢 tool）。**Tailscale 唔係產品答案**（叫人特登裝 = 多嚿魚）→ human-gate **自己用機器 `ssh` 開免費 serverless tunnel**（pinggy→localhost.run fallback），每 user 自己一條、用完即斷、publisher $0。`{host}` 可 bypass。
+- M3 加固（2 輪 review）：exact-segment + `timingSafeEqual` token guard、CSP/nosniff、GET-only method guard、`/tap` server clamp、`fetch` redirect:manual+timeout、CDP port-match guard、15 分鐘 relay lifetime cap、每條失敗/遺棄路徑都 cleanup、singleton-swap race guard、docker/link-local IP 隔離、pass-detection 擴到 reCAPTCHA+hCaptcha+Turnstile、await reason codes。
 
-## ⏭️ 下一步
-- **M3 UX 打磨**：手機頁 responsive、多輪 challenge、CDP 斷線 reconnect、tunnel 斷線重連、觸發穩定度（tool description 引導 agent 一撞即 call）。
-- **真機測（仲未做）**：用真手機開 public URL（cellular）→ 真手指 solve → 確認真 Google token。今次 session 用程式注入 token 證 detect-logic，未喺真機行過。
-- **M4 ship**：`/name-product` → npm + GitHub（README 強調 human-solves≠solver；唔提供 auto-solve code path；README 現仲寫 P2 roadmap，到時一齊更新）。
+## ⏭️ 下一步（按優先）
+1. **真機測（唯一 verification gap）**：用真手機（cellular）開 public URL → 真手指 solve → 確認真 Google token。今次用程式注入 token 證咗 detect-logic；真手指→真 token 靠 2026-06-15 PoC，未喺真機經 tunnel 行過。
+2. **Publish（等 Nicole go，不可逆）**：見下「Publish 步驟」。
+3. M4 patch（非 blocker）：見「已知限制」。
 
-## ⚠️ 仲未驗證 / 已知 trade-off（老實標）
-- **真手機 + 真手指 → 真 Google token** 未喺今次 session re-run（detect-logic 用注入 token 證；真 Google-accept 靠 2026-06-15 PoC）。
-- **tunnel 默認靠免費第三方 host**（pinggy→localhost.run）：**Nicole 已拍板 = (A) 免費 + 每 user serverless（publisher 唔出錢、唔養 server）**。緩解「單一 host 消失」= 多免費 provider fallback（兩個都驗證過）；Nicole 自己用 Tailscale/own VPS 可完全 own-it。已知細節：free tier 60 分鐘 cap（對單次 solve 綽綽有餘）、URL 醜（係 tappable link，唔打字）。
+## 📦 Publish 步驟（prep 好，等 Nicole 親自 go — 不可逆/對外）
+```bash
+cd ~/MyGithub/human-gate
+npm publish --access public        # name=human-gate (npm 上未被佔，已查)
+# GitHub：開 public repo mcpware/human-gate（或 nicole/…）→ git remote add origin … → git push -u origin master
+```
+- npm 未登入就 `npm login` 先。publish 前可 `npm pack --dry-run` 睇 tarball（應只含 src/ + README + LICENSE）。
+- README 已強調 human-solves≠solver、唔提供 auto-solve code path。
 
-## Scope（老實切）
-- ✅ in：用戶開住 mobile agent chat 撞 CAPTCHA；agent 連得到一條 CDP endpoint。
+## ⚠️ 已知限制 / trade-off（老實標）
+- **真手機未經 tunnel 行過**（見下一步 #1）。
+- **viewport-on-navigation drift（M4）**：`vp` 喺 start 一次過攞；若 solve 中途 page 導航令 innerWidth 變，tap 座標會偏。CAPTCHA solve 好少中途導航，列為 patch。
+- **tunnel 默認靠免費第三方**（pinggy/localhost.run）：Nicole 拍板可接受（每 user serverless、publisher $0）；緩解 = 多 provider fallback + `{host}` 可指自己。free tier 60 分鐘 cap（單次 solve 綽綽有餘）、URL 醜（tappable link，唔打字）。
+
+## Scope
+- ✅ in：用戶開住 mobile agent chat 撞 CAPTCHA；agent 連得到一條 CDP endpoint（Playwright/Puppeteer/browser-use…）。
 - ❌ out：全程無人睇 chat；Computer-use 截圖式 agent（冇 CDP attach 點）。
 
-## 完整設計 + 三份研究
-`~/MyGithub/agentic-journal/projects/products/human-gate/`：`human-gate.md` + `research/`（reCAPTCHA / AI-agent-handoff / MCP競品）。
+## 檔案地圖
+- `src/relay.js`（CDP relay + Tunnel，raw `ws`）、`src/mcp-server.js`（2 tool）、`src/index.js`（P0 humanGate lib）、`test/mcp-e2e.js`、`test/tunnel-e2e.js`、`examples/captcha-demo.js`（programmatic）、`examples/otp-demo.js`（lib）。
+- 設計 + 研究：`~/MyGithub/agentic-journal/projects/products/human-gate/`。
