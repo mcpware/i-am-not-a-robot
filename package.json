@@ -1,0 +1,36 @@
+{
+  "name": "human-gate",
+  "version": "0.1.0",
+  "description": "The missing input() for headless agents. Pause any Playwright/Puppeteer agent at a step only a human can do (CAPTCHA, OTP, 2FA, approve/reject), push a screenshot to your phone, resume on your tap. Bring your own browser, no cloud lock-in.",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": ["src", "README.md", "LICENSE"],
+  "scripts": {
+    "example:cdp": "node examples/captcha-demo.js",
+    "selftest": "node src/selftest.js"
+  },
+  "keywords": [
+    "playwright",
+    "puppeteer",
+    "human-in-the-loop",
+    "hitl",
+    "ai-agent",
+    "browser-agent",
+    "captcha",
+    "otp",
+    "2fa",
+    "approval",
+    "ntfy",
+    "automation"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "dependencies": {},
+  "peerDependencies": {},
+  "peerDependenciesMeta": {}
+}
