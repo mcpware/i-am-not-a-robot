@@ -355,6 +355,9 @@ class HumanRelay {
     await this.cdp.connect();
     await this.cdp.send('Page.enable');
     await this.cdp.send('Runtime.enable');
+    // Background tabs don't composite, so the screencast would be blank. Bring the
+    // target to front so it actually renders frames for the phone.
+    try { await this.cdp.send('Page.bringToFront'); } catch { /* not always supported */ }
 
     try {
       const r = await this.cdp.send('Runtime.evaluate', {
@@ -372,10 +375,17 @@ class HumanRelay {
       for (const res of this.sse) { try { res.write(`data: ${p.data}\n\n`); } catch { /* client gone */ } }
       try { await this.cdp.send('Page.screencastFrameAck', { sessionId: p.sessionId }); } catch { /* race on stop */ }
     });
+    // Cap frame size + rate so the JPEG screencast stays light over a phone tunnel.
+    // Full-viewport frames were too heavy and made image challenges feel laggy on
+    // real devices. Tap accuracy is unaffected (coords map to the real viewport).
+    const FCAP = 700;
+    const fscale = Math.min(1, FCAP / Math.max(this.vp.w, this.vp.h));
+    const sw = Math.max(1, Math.round(this.vp.w * fscale));
+    const sh = Math.max(1, Math.round(this.vp.h * fscale));
     await this.cdp.send('Page.startScreencast', {
-      format: 'jpeg', quality: 55, maxWidth: this.vp.w, maxHeight: this.vp.h, everyNthFrame: 1,
+      format: 'jpeg', quality: 50, maxWidth: sw, maxHeight: sh, everyNthFrame: 1,
     });
-    this.log('state', 'screencast started');
+    this.log('state', 'screencast started', { frame: sw + 'x' + sh });
 
     this.token = crypto.randomBytes(12).toString('hex');
     await this._startHttp({ host, port });
