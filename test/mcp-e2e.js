@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * End-to-end QA for the not-a-robot MCP server, from a real MCP client's view.
+ * End-to-end QA for the i-am-not-a-robot MCP server, from a real MCP client's view.
  * Transport is WebSocket (binary frames down, JSON taps up). Local only (tunnel
  * off) so it's fast + deterministic. Requires a CDP Chrome at CDP_URL with a page.
  */
@@ -48,7 +48,7 @@ async function resetPageToken() {
   const transport = new StdioClientTransport({
     command: 'node',
     args: [path.join(__dirname, '..', 'src', 'mcp-server.js')],
-    env: { ...process.env, NOT_A_ROBOT_TUNNEL: 'off' },
+    env: { ...process.env, IAMNOTAROBOT_TUNNEL: 'off' },
     stderr: 'inherit',
   });
   const client = new Client({ name: 'hg-e2e', version: '0.0.0' });

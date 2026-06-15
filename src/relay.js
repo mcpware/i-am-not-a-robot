@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * not-a-robot live relay — raw CDP over a WebSocket (NO playwright), streamed to
+ * i-am-not-a-robot live relay — raw CDP over a WebSocket (NO playwright), streamed to
  * the phone over a WebSocket transport.
  *
  * Streams a real browser page to the user's phone via CDP `Page.startScreencast`
@@ -28,11 +28,11 @@ const { spawn } = require('child_process');
 const WebSocket = require('ws');
 const { WebSocketServer } = WebSocket;
 
-const TAG = '[not-a-robot:relay]';
+const TAG = '[i-am-not-a-robot:relay]';
 
 /** Structured logger -> stderr only. */
 function makeLogger(enabled) {
-  const on = enabled && process.env.NOT_A_ROBOT_QUIET !== '1';
+  const on = enabled && process.env.IAMNOTAROBOT_QUIET !== '1';
   return (level, msg, extra) => {
     if (!on) return;
     const line = `${TAG} ${level.toUpperCase()} ${msg}`;
@@ -184,7 +184,7 @@ function renderPhonePage(title) {
 <html><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<title>not-a-robot</title>
+<title>i-am-not-a-robot</title>
 <style>
 *{box-sizing:border-box}
 html,body{margin:0;min-height:100%;background:#0b0b0f;color:#e8e8ea;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-tap-highlight-color:transparent}
@@ -286,7 +286,7 @@ async function ensureCloudflared(log) {
   if (plat === 'linux') { asset = arch === 'arm64' ? 'cloudflared-linux-arm64' : 'cloudflared-linux-amd64'; binName = 'cloudflared'; }
   else if (plat === 'win32') { asset = 'cloudflared-windows-amd64.exe'; binName = 'cloudflared.exe'; }
   else return null; // macOS ships a .tgz; fall back to ssh tunnels there
-  const cacheDir = path.join(os.homedir(), '.cache', 'not-a-robot');
+  const cacheDir = path.join(os.homedir(), '.cache', 'i-am-not-a-robot');
   const bin = path.join(cacheDir, binName);
   try { fs.accessSync(bin, fs.constants.X_OK); return bin; } catch { /* not cached */ }
   try {
@@ -474,7 +474,7 @@ class HumanRelay {
     await this._startHttp({ host, port });
 
     // Public URL so the phone reaches the relay from anywhere with zero setup.
-    const tunnelMode = tunnel !== undefined ? tunnel : (process.env.NOT_A_ROBOT_TUNNEL === 'off' ? 'off' : 'auto');
+    const tunnelMode = tunnel !== undefined ? tunnel : (process.env.IAMNOTAROBOT_TUNNEL === 'off' ? 'off' : 'auto');
     if (tunnelMode !== 'off' && !host) {
       this.tunnel = new Tunnel(this.log);
       const localPort = this.server.address().port;
@@ -520,7 +520,7 @@ class HumanRelay {
             'X-Content-Type-Options': 'nosniff',
             'Referrer-Policy': 'no-referrer',
           });
-          res.end(renderPhonePage('not-a-robot · solve the CAPTCHA'));
+          res.end(renderPhonePage('i-am-not-a-robot · solve the CAPTCHA'));
           return;
         }
         res.writeHead(404).end('not found');

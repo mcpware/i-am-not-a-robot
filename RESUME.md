@@ -1,4 +1,4 @@
-# RESUME — not-a-robot（接手點）
+# RESUME — i-am-not-a-robot（接手點）
 
 更新：2026-06-15
 
@@ -17,10 +17,10 @@
 - 零 playwright（raw CDP over `ws`）、deps 淨 `ws` + `@modelcontextprotocol/sdk`。
 
 ## 🧩 形態 + 架構決定
-- MCP stdio server（npm `not-a-robot`，`npx not-a-robot` / `claude mcp add`）。唯一 integration 點 = 一條 CDP endpoint。
+- MCP stdio server（npm `i-am-not-a-robot`，`npx i-am-not-a-robot` / `claude mcp add`）。唯一 integration 點 = 一條 CDP endpoint。
 - **掟走 playwright → raw CDP over `ws`**；robust > 字面 zero-dep（Nicole 拍板）；MCP 用官方 SDK。
 - 兩個 tool：`start_human_relay({cdpUrl,targetUrl?})→{relayUrl,relayUrls,pageUrl}`、`await_human_solve({timeoutMs?})→{passed}`。
-- **跨網絡 = 核心**（同 wifi 你人就喺電腦邊，唔使呢 tool）。**Tailscale 唔係產品答案**（叫人特登裝 = 多嚿魚）→ not-a-robot **自己用機器 `ssh` 開免費 serverless tunnel**（**localhost.run primary → pinggy fallback**），每 user 自己一條、用完即斷、publisher $0。`{host}` 可 bypass。
+- **跨網絡 = 核心**（同 wifi 你人就喺電腦邊，唔使呢 tool）。**Tailscale 唔係產品答案**（叫人特登裝 = 多嚿魚）→ i-am-not-a-robot **自己用機器 `ssh` 開免費 serverless tunnel**（**localhost.run primary → pinggy fallback**），每 user 自己一條、用完即斷、publisher $0。`{host}` 可 bypass。
   - ⚠️ **pinggy 免費版對 browser User-Agent 彈自己個 interstitial 警告頁（實測 verified）→ 真手機 load 唔到我哋個頁**，所以 localhost.run 做 primary（browser 直接過到）；pinggy 只做 :22-被擋網絡嘅 fallback（用戶要撳穿 interstitial）。
 - M3 加固（2 輪 review）：exact-segment + `timingSafeEqual` token guard、CSP/nosniff、GET-only method guard、`/tap` server clamp、`fetch` redirect:manual+timeout、CDP port-match guard、15 分鐘 relay lifetime cap、每條失敗/遺棄路徑都 cleanup、singleton-swap race guard、docker/link-local IP 隔離、pass-detection 擴到 reCAPTCHA+hCaptcha+Turnstile、await reason codes。
 
@@ -30,9 +30,9 @@
 
 ## 📦 Publish 步驟（prep 好，等 Nicole 親自 go — 不可逆/對外）
 ```bash
-cd ~/MyGithub/not-a-robot
-npm publish --access public        # name=not-a-robot (npm 上未被佔，已查)
-# GitHub：開 public repo mcpware/not-a-robot（或 nicole/…）→ git remote add origin … → git push -u origin master
+cd ~/MyGithub/i-am-not-a-robot
+npm publish --access public        # name=i-am-not-a-robot (npm 上未被佔，已查)
+# GitHub：開 public repo mcpware/i-am-not-a-robot（或 nicole/…）→ git remote add origin … → git push -u origin master
 ```
 - npm 未登入就 `npm login` 先。publish 前可 `npm pack --dry-run` 睇 tarball（應只含 src/ + README + LICENSE）。
 - README 已強調 human-solves≠solver、唔提供 auto-solve code path。
@@ -47,4 +47,4 @@ npm publish --access public        # name=not-a-robot (npm 上未被佔，已查
 
 ## 檔案地圖
 - `src/relay.js`（CDP relay + Tunnel，raw `ws`）、`src/mcp-server.js`（2 tool）、`src/index.js`（P0 humanGate lib）、`test/mcp-e2e.js`、`test/tunnel-e2e.js`、`examples/captcha-demo.js`（programmatic）、`examples/otp-demo.js`（lib）。
-- 設計 + 研究：`~/MyGithub/agentic-journal/projects/products/not-a-robot/`。
+- 設計 + 研究：`~/MyGithub/agentic-journal/projects/products/i-am-not-a-robot/`。

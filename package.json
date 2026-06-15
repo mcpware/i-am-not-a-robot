@@ -1,5 +1,5 @@
 {
-  "name": "not-a-robot",
+  "name": "i-am-not-a-robot",
   "version": "0.1.0",
   "description": "Hand an in-page CAPTCHA from your AI browser agent to a real human on their phone over CDP. They solve it with a finger and the agent resumes. MCP server, bring your own browser, no cloud lock-in. A human-in-the-loop relay, not a CAPTCHA solver.",
   "type": "commonjs",
@@ -21,8 +21,8 @@
     "mcp:tunnel-e2e": "node test/tunnel-e2e.js"
   },
   "bin": {
-    "not-a-robot": "src/mcp-server.js",
-    "not-a-robot-mcp": "src/mcp-server.js"
+    "i-am-not-a-robot": "src/mcp-server.js",
+    "i-am-not-a-robot-mcp": "src/mcp-server.js"
   },
   "keywords": [
     "mcp",
