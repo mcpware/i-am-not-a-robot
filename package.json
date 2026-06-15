@@ -7,10 +7,20 @@
   "exports": {
     ".": "./src/index.js"
   },
-  "files": ["src", "README.md", "LICENSE"],
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "example:cdp": "node examples/captcha-demo.js",
-    "selftest": "node src/selftest.js"
+    "selftest": "node src/selftest.js",
+    "mcp": "node src/mcp-server.js",
+    "mcp:e2e": "node test/mcp-e2e.js",
+    "mcp:tunnel-e2e": "node test/tunnel-e2e.js"
+  },
+  "bin": {
+    "human-gate-mcp": "src/mcp-server.js"
   },
   "keywords": [
     "playwright",
@@ -30,7 +40,9 @@
     "node": ">=18"
   },
   "license": "MIT",
-  "dependencies": {},
-  "peerDependencies": {},
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ws": "^8.21.0"
+  },
   "peerDependenciesMeta": {}
 }
