@@ -28,7 +28,7 @@ function waitFor(cond, ms) {
   const transport = new StdioClientTransport({
     command: 'node',
     args: [path.join(__dirname, '..', 'src', 'mcp-server.js')],
-    env: { ...process.env, HUMAN_GATE_TUNNEL: 'auto' },
+    env: { ...process.env, NOT_A_ROBOT_TUNNEL: 'auto' },
     stderr: 'inherit',
   });
   const client = new Client({ name: 'hg-tunnel-e2e', version: '0.0.0' });

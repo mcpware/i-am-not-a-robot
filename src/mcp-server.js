@@ -2,7 +2,7 @@
 'use strict';
 
 /**
- * human-gate MCP server (stdio).
+ * not-a-robot MCP server (stdio).
  *
  * Exposes two tools so any MCP-capable browser agent (Claude Code, Cursor,
  * Codex, browser-use, …) can hand an in-page CAPTCHA to a real human on a phone
@@ -30,7 +30,7 @@ const { HumanRelay } = require('./relay.js');
 // M1: a single active relay session shared across the two tool calls.
 let relay = null;
 
-const server = new McpServer({ name: 'human-gate', version: '0.1.0' });
+const server = new McpServer({ name: 'not-a-robot', version: '0.1.0' });
 
 server.registerTool(
   'start_human_relay',
@@ -108,8 +108,8 @@ server.registerTool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  if (process.env.HUMAN_GATE_QUIET !== '1') {
-    console.error('[human-gate] MCP server ready (stdio) — tools: start_human_relay, await_human_solve');
+  if (process.env.NOT_A_ROBOT_QUIET !== '1') {
+    console.error('[not-a-robot] MCP server ready (stdio) — tools: start_human_relay, await_human_solve');
   }
 }
 
@@ -120,6 +120,6 @@ process.on('SIGTERM', onSignal);
 process.on('SIGINT', onSignal);
 
 main().catch((e) => {
-  console.error('[human-gate] fatal:', e);
+  console.error('[not-a-robot] fatal:', e);
   process.exit(1);
 });

@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * human-gate — the missing input() for headless agents.
+ * not-a-robot — the missing input() for headless agents.
  *
  * Pause any Playwright/Puppeteer flow at a step only a human can do
  * (CAPTCHA, OTP, 2FA, ambiguous field, approve/reject), push a screenshot
@@ -14,18 +14,18 @@
  *   - Phone-native Pattern B: notify -> human answers one thing -> resume.
  *
  * Every entry point, decision branch, state change and external call is logged
- * (toggle with { log: false } or HUMAN_GATE_QUIET=1).
+ * (toggle with { log: false } or NOT_A_ROBOT_QUIET=1).
  */
 
 const http = require('http');
 const crypto = require('crypto');
 const os = require('os');
 
-const TAG = '[human-gate]';
+const TAG = '[not-a-robot]';
 
 /** Structured logger. Logs to stderr so it never pollutes stdout data. */
 function makeLogger(enabled) {
-  const on = enabled && process.env.HUMAN_GATE_QUIET !== '1';
+  const on = enabled && process.env.NOT_A_ROBOT_QUIET !== '1';
   return (level, msg, extra) => {
     if (!on) return;
     const line = `${TAG} ${level.toUpperCase()} ${msg}`;
@@ -49,7 +49,7 @@ function detectLanIp() {
 async function captureScreenshot(page, capture, log) {
   if (!page || typeof page.screenshot !== 'function') {
     throw new Error(
-      'human-gate: first arg must be a page-like object with a screenshot() method ' +
+      'not-a-robot: first arg must be a page-like object with a screenshot() method ' +
         '(Playwright Page, Puppeteer Page, or a shim).'
     );
   }
@@ -94,7 +94,7 @@ function renderAnswerPage({ prompt, expect, pngBase64, submitted }) {
          <button style="width:100%;padding:16px;font-size:18px;margin-top:12px;background:#2563eb;color:#fff;border:0;border-radius:10px">Send</button>`;
   return `<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
 <body style="font-family:system-ui;max-width:640px;margin:24px auto;padding:0 16px">
-<h2 style="margin:0 0 4px">human-gate</h2>
+<h2 style="margin:0 0 4px">not-a-robot</h2>
 <p style="font-size:18px;margin:0 0 16px">${esc(prompt)}</p>
 <img src="data:image/png;base64,${pngBase64}" style="width:100%;border:1px solid #ddd;border-radius:8px">
 <form method=POST>${control}</form>
@@ -226,7 +226,7 @@ async function humanGate(page, opts = {}) {
 
   const timer = setTimeout(() => {
     log('error', 'timed out waiting for human', { timeoutMs });
-    rejectAnswer(new Error(`human-gate: timed out after ${timeoutMs}ms waiting for a human answer`));
+    rejectAnswer(new Error(`not-a-robot: timed out after ${timeoutMs}ms waiting for a human answer`));
   }, timeoutMs);
 
   try {
