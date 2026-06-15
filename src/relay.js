@@ -236,7 +236,7 @@ const CAPTCHA_CLIP_EXPR = `(function(){
   function box(el){ if(!el) return null; var r=el.getBoundingClientRect(); if(r.width<8||r.height<8) return null;
     var st=getComputedStyle(el); if(st.visibility==='hidden'||st.display==='none'||parseFloat(st.opacity||'1')<0.05) return null;
     if(r.bottom<0||r.right<0||r.top>innerHeight||r.left>innerWidth) return null; return {x:r.left,y:r.top,w:r.width,h:r.height}; }
-  var sel=['iframe[src*="recaptcha/api2/anchor"]','iframe[src*="recaptcha/api2/bframe"]','.g-recaptcha','[data-sitekey]','iframe[src*="hcaptcha.com"]','iframe[title*="hCaptcha"]','.cf-turnstile','iframe[src*="challenges.cloudflare.com"]'];
+  var sel=['iframe[src*="recaptcha/api2/anchor"]','iframe[src*="recaptcha/api2/bframe"]','iframe[src*="recaptcha/enterprise/anchor"]','iframe[src*="recaptcha/enterprise/bframe"]','iframe[title="reCAPTCHA"]','.g-recaptcha','[data-sitekey]','iframe[src*="hcaptcha.com"]','iframe[src*="newassets.hcaptcha.com"]','.h-captcha','.cf-turnstile','iframe[src*="challenges.cloudflare.com"]'];
   var rects=[];
   sel.forEach(function(s){ document.querySelectorAll(s).forEach(function(e){ var b=box(e); if(b)rects.push(b); var p=e.parentElement; if(p){var pb=box(p); if(pb&&pb.w<innerWidth*0.95)rects.push(pb);} }); });
   if(!rects.length) return null;
@@ -560,11 +560,18 @@ class HumanRelay {
 
   /** Poll-capture the captcha region and push it to the phone over WS. */
   _startCapture() {
+    this._lastClip = null; // last good captcha box, held through brief detection gaps
+    this._missCount = 0;
     this._capTimer = setInterval(async () => {
       if (!this.cdp || this.cdp.closed) return;
       if (this.wsClients.size === 0 && this.lastFrame) return; // nobody watching
       try {
-        const clip = await this._captchaClip();
+        let clip = await this._captchaClip();
+        // Debounce: a momentary detection miss (mid-transition) shouldn't flicker
+        // the whole page in. Hold the last good box for a few frames, then give up.
+        if (clip) { this._lastClip = clip; this._missCount = 0; }
+        else if (this._lastClip && this._missCount < 6) { this._missCount++; clip = this._lastClip; }
+        else { this._missCount++; }
         this.clip = clip;
         const params = { format: 'jpeg', quality: 80 };
         if (clip) params.clip = { x: clip.x, y: clip.y, width: clip.width, height: clip.height, scale: 1 };
