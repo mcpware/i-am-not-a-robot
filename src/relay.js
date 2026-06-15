@@ -1,28 +1,32 @@
 'use strict';
 
 /**
- * human-gate live relay — raw CDP over a WebSocket (NO playwright).
+ * human-gate live relay — raw CDP over a WebSocket (NO playwright), streamed to
+ * the phone over a WebSocket transport.
  *
  * Streams a real browser page to the user's phone via CDP `Page.startScreencast`
  * and forwards the human's taps back into the SAME browser session via
  * `Input.dispatchMouseEvent`, so a real finger solves the in-page CAPTCHA.
- * Pass detection polls the reCAPTCHA token in the page (`grecaptcha.getResponse()`
- * / the `g-recaptcha-response` textarea), which only fills once Google accepts.
  *
- * Talks raw CDP (the protocol Playwright/Puppeteer/browser-use all sit on top of),
- * so the only integration point is one CDP HTTP endpoint. The single npm runtime
- * dependency is `ws` (a WebSocket client; Node <22 has no global WebSocket).
+ * Transport is a single WebSocket (frames down as binary JPEG, taps up as JSON):
+ * Cloudflare buffers SSE but streams WebSocket natively, which lets us use a
+ * cloudflared quick tunnel (a nearby Cloudflare edge -> ~3x lower latency than a
+ * single-server ssh tunnel). cloudflared is the primary tunnel; ssh tunnels
+ * (localhost.run, then pinggy) are the zero-binary fallback.
  *
- * Every entry point, decision branch, state change and external call logs to
- * stderr (toggle with { log:false } or HUMAN_GATE_QUIET=1). stdout is reserved
- * for the MCP JSON-RPC channel and must never be written to here.
+ * Pass detection polls the CAPTCHA token in the page (reCAPTCHA v2/v3, hCaptcha,
+ * Cloudflare Turnstile). Runtime deps: `ws`. Logs go to stderr; stdout is for the
+ * MCP JSON-RPC channel and must never be written to here.
  */
 
 const http = require('http');
 const os = require('os');
+const fs = require('fs');
+const path = require('path');
 const crypto = require('crypto');
-const WebSocket = require('ws');
 const { spawn } = require('child_process');
+const WebSocket = require('ws');
+const { WebSocketServer } = WebSocket;
 
 const TAG = '[human-gate:relay]';
 
@@ -39,10 +43,8 @@ function makeLogger(enabled) {
 
 /**
  * All non-internal IPv4 addresses, ranked so a phone on the same wifi works by
- * default: real RFC1918 LAN (192.168/10/172.16-31) first, then everything else,
- * with Tailscale CGNAT (100.64/10) LAST as primary — it's only reachable if the
- * phone is on the same tailnet, but we still return it as a candidate (it
- * doubles as a cross-network tunnel for tailnet users).
+ * default: real RFC1918 LAN first, then everything else, Tailscale CGNAT last.
+ * docker/veth/virbr interfaces and link-local addresses are skipped entirely.
  */
 function listIpv4() {
   const out = [];
@@ -70,10 +72,8 @@ function detectLanIp() {
 }
 
 /**
- * Minimal raw CDP client over a single page-level WebSocket.
- * Replaces playwright's CDPSession: send(method,params) -> Promise(result),
- * on(method, handler) for events. No sessionId juggling needed because we
- * connect directly to the page target's webSocketDebuggerUrl.
+ * Minimal raw CDP client over a single page-level WebSocket. Replaces playwright's
+ * CDPSession: send(method,params) -> Promise(result), on(method, handler) for events.
  */
 class CdpSession {
   constructor(wsUrl, log) {
@@ -101,7 +101,7 @@ class CdpSession {
       ws.on('close', () => {
         this.closed = true;
         this.log('state', 'CDP ws closed');
-        for (const { reject } of this._pending.values()) { try { reject(new Error('CDP socket closed')); } catch { /* noop */ } }
+        for (const { reject: rej } of this._pending.values()) { try { rej(new Error('CDP socket closed')); } catch { /* noop */ } }
         this._pending.clear();
       });
     });
@@ -166,19 +166,17 @@ function redactUrl(u) {
 }
 
 /**
- * True if the CDP debugger ws is served on the same PORT as cdpUrl. Chrome always
- * serves the page ws on the same port as the /json endpoint, so a port mismatch
- * means the JSON pointed us elsewhere (SSRF signal) and we refuse. We deliberately
- * do NOT compare hostnames: legitimate setups report a different host than you
- * dialed (localhost vs 127.0.0.1, a container IP, an ssh-tunnelled remote Chrome).
+ * True if the CDP debugger ws is on the same PORT as cdpUrl. Chrome serves the
+ * page ws on the same port as /json, so a port mismatch means the JSON pointed us
+ * elsewhere (SSRF) and we refuse. Hostnames are deliberately NOT compared
+ * (localhost vs 127.0.0.1, container IPs, ssh-tunnelled remotes all differ legit).
  */
 function sameCdpHost(cdpUrl, wsUrl) {
-  try {
-    return new URL(cdpUrl).port === new URL(wsUrl).port;
-  } catch { return false; }
+  try { return new URL(cdpUrl).port === new URL(wsUrl).port; }
+  catch { return false; }
 }
 
-/** The phone page: live screencast <img> + tap-forwarding. Mobile-polished, zero deps. */
+/** The phone page: a WebSocket pulls binary JPEG frames + sends taps. Zero deps. */
 function renderPhonePage(title) {
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   title = esc(title);
@@ -206,11 +204,17 @@ img{width:100%;display:block}
 <div id="hint">Tap exactly where you would on a computer. When the challenge clears, you can close this page.</div>
 <script>
 var img=document.getElementById('v'),dot=document.getElementById('dot'),ring=document.getElementById('ring'),wrap=document.getElementById('wrap'),hint=document.getElementById('hint');
-var base=location.pathname.replace(/\\/$/,''),solved=false;
-var es=new EventSource(base+'/stream');
-es.onmessage=function(e){if(!solved){img.src='data:image/jpeg;base64,'+e.data;dot.className='dot live';}};
-es.addEventListener('solved',function(){solved=true;dot.className='dot live';img.style.opacity='0.35';hint.textContent='✓ Solved — the agent has it. You can close this page.';hint.style.color='#22c55e';hint.style.fontSize='15px';});
-es.onerror=function(){if(!solved)dot.className='dot off';};
+var base=location.pathname.replace(/\\/$/,''),solved=false,curUrl=null;
+var ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+base+'/ws');
+ws.binaryType='blob';
+ws.onmessage=function(e){
+  if(typeof e.data==='string'){ try{var m=JSON.parse(e.data); if(m.type==='solved'){solved=true;dot.className='dot live';img.style.opacity='0.35';hint.textContent='\\u2713 Solved \\u2014 the agent has it. You can close this page.';hint.style.color='#22c55e';hint.style.fontSize='15px';}}catch(_){} return; }
+  if(solved) return;
+  var url=URL.createObjectURL(e.data); var old=curUrl; curUrl=url; img.src=url; dot.className='dot live';
+  if(old){ setTimeout(function(){URL.revokeObjectURL(old);},200); }
+};
+ws.onclose=function(){ if(!solved) dot.className='dot off'; };
+ws.onerror=function(){ if(!solved) dot.className='dot off'; };
 function tap(cx,cy){
   var ir=img.getBoundingClientRect();
   var nx=(cx-ir.left)/ir.width, ny=(cy-ir.top)/ir.height;
@@ -218,24 +222,67 @@ function tap(cx,cy){
   var wr=wrap.getBoundingClientRect();
   ring.style.left=(cx-wr.left)+'px';ring.style.top=(cy-wr.top)+'px';
   ring.classList.remove('go');void ring.offsetWidth;ring.classList.add('go');
-  fetch(base+'/tap',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nx:nx,ny:ny})});
+  if(ws.readyState===1) ws.send(JSON.stringify({nx:nx,ny:ny}));
 }
 img.addEventListener('click',function(ev){tap(ev.clientX,ev.clientY);});
 </script>
 </body></html>`;
 }
 
+// ---------------------------------------------------------------------------
+// Public tunnels. cloudflared (primary) streams WebSocket from a nearby edge =
+// low latency; ssh tunnels (localhost.run -> pinggy) are the zero-binary fallback.
+// ---------------------------------------------------------------------------
+
+/** Download a URL to a file, following redirects (GitHub release -> CDN). */
+async function downloadFile(url, dest) {
+  const res = await fetch(url, { redirect: 'follow' });
+  if (!res.ok) throw new Error(`download HTTP ${res.status}`);
+  const { Readable } = require('stream');
+  await new Promise((resolve, reject) => {
+    const out = fs.createWriteStream(dest);
+    Readable.fromWeb(res.body).pipe(out).on('finish', resolve).on('error', reject);
+  });
+}
+
 /**
- * Zero-binary public tunnel via the machine's own ssh client, so the phone can
- * reach the relay from anywhere (cellular, other wifi) with no user setup.
- * Anonymous + free; tries providers in order so it doesn't hinge on one host.
- * Power users can bypass this entirely by passing { host } (their own URL).
+ * Poll until the public URL's DNS record propagates, or timeout. Uses dns.resolve4
+ * (c-ares, queries DNS directly) rather than fetch/getaddrinfo, which would cache
+ * the first NXDOMAIN miss and then keep failing even after the record appears.
  */
-// Order matters: localhost.run is PRIMARY because it passes real phone-browser
-// traffic straight through. pinggy's free tier shows its own interstitial warning
-// page to browser User-Agents (verified), which breaks "open the link and solve";
-// it stays as a fallback only because it runs on :443 (reachable where :22 is
-// firewall-blocked), at the cost of the user having to click through that page.
+async function waitReachable(url, timeoutMs) {
+  const dns = require('dns').promises;
+  let host;
+  try { host = new URL(url).hostname; } catch { return false; }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try { const addrs = await dns.resolve4(host); if (addrs && addrs.length) return true; }
+    catch { /* record not propagated yet */ }
+    await new Promise((r) => setTimeout(r, 1200));
+  }
+  return false;
+}
+
+/** Ensure a cloudflared binary exists (cached, auto-fetched once). null if unsupported/failed. */
+async function ensureCloudflared(log) {
+  const plat = process.platform, arch = process.arch;
+  let asset, binName;
+  if (plat === 'linux') { asset = arch === 'arm64' ? 'cloudflared-linux-arm64' : 'cloudflared-linux-amd64'; binName = 'cloudflared'; }
+  else if (plat === 'win32') { asset = 'cloudflared-windows-amd64.exe'; binName = 'cloudflared.exe'; }
+  else return null; // macOS ships a .tgz; fall back to ssh tunnels there
+  const cacheDir = path.join(os.homedir(), '.cache', 'human-gate');
+  const bin = path.join(cacheDir, binName);
+  try { fs.accessSync(bin, fs.constants.X_OK); return bin; } catch { /* not cached */ }
+  try {
+    fs.mkdirSync(cacheDir, { recursive: true });
+    const url = `https://github.com/cloudflare/cloudflared/releases/latest/download/${asset}`;
+    log('external', 'fetching cloudflared binary (one-time, ~37MB)', { asset });
+    await downloadFile(url, bin);
+    if (plat !== 'win32') fs.chmodSync(bin, 0o755);
+    return bin;
+  } catch (e) { log('warn', 'cloudflared fetch failed — will use ssh tunnel', e && e.message); return null; }
+}
+
 const TUNNEL_PROVIDERS = [
   {
     name: 'localhost.run',
@@ -257,27 +304,56 @@ class Tunnel {
     this.provider = null;
   }
 
-  /** Open a public tunnel to the given local port. Resolves to the URL, or null if all providers fail. */
+  /** Open a public tunnel to the given local port. cloudflared first, then ssh. Resolves to URL or null. */
   async open(port, { timeoutMs = 20000 } = {}) {
+    try {
+      const url = await this._openCloudflared(port);
+      if (url) { this.url = url; this.provider = 'cloudflared'; this.log('state', 'tunnel up', { provider: 'cloudflared', url }); return url; }
+    } catch (e) { this.log('warn', 'cloudflared failed — trying ssh', e && e.message); }
+    this.close(); // kill any half-spawned cloudflared before the fallback
+
     for (const prov of TUNNEL_PROVIDERS) {
       this.log('external', 'opening tunnel', { provider: prov.name, port });
-      const url = await this._try(prov, port, timeoutMs).catch((e) => {
+      const url = await this._trySsh(prov, port, timeoutMs).catch((e) => {
         this.log('warn', 'tunnel provider failed', { provider: prov.name, err: e && e.message });
         return null;
       });
-      if (url) {
-        this.url = url;
-        this.provider = prov.name;
-        this.log('state', 'tunnel up', { provider: prov.name, url });
-        return url;
-      }
-      this.close(); // kill the failed provider's ssh before trying the next
+      if (url) { this.url = url; this.provider = prov.name; this.log('state', 'tunnel up', { provider: prov.name, url }); return url; }
+      this.close();
     }
-    this.log('warn', 'all tunnel providers failed — relay will be LAN-only');
+    this.log('warn', 'all tunnels failed — relay will be LAN-only');
     return null;
   }
 
-  _try(prov, port, timeoutMs) {
+  async _openCloudflared(port) {
+    const bin = await ensureCloudflared(this.log);
+    if (!bin) return null; // unsupported platform / fetch failed -> fall back to ssh
+    return new Promise((resolve, reject) => {
+      const proc = spawn(bin, ['tunnel', '--url', `http://localhost:${port}`, '--no-autoupdate']);
+      this.proc = proc;
+      let buf = '';
+      let settled = false;
+      const finish = (fn, arg) => { if (settled) return; settled = true; clearTimeout(timer); fn(arg); };
+      const onData = (d) => {
+        buf += d.toString();
+        if (buf.length > 65536) buf = buf.slice(-4096);
+        const m = buf.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
+        if (m) {
+          proc.stdout.removeListener('data', onData);
+          proc.stderr.removeListener('data', onData);
+          this.log('external', 'cloudflared url up — waiting for DNS', { url: m[0] });
+          waitReachable(m[0], 20000).then((ok) => finish(ok ? resolve : reject, ok ? m[0] : new Error('cloudflared url not reachable')));
+        }
+      };
+      proc.stdout.on('data', onData);
+      proc.stderr.on('data', onData);
+      proc.on('error', (e) => finish(reject, e));
+      proc.on('exit', (code) => finish(reject, new Error(`cloudflared exited (${code})`)));
+      const timer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* noop */ } finish(reject, new Error('cloudflared timeout')); }, 50000);
+    });
+  }
+
+  _trySsh(prov, port, timeoutMs) {
     return new Promise((resolve, reject) => {
       const proc = spawn('ssh', prov.args(port));
       this.proc = proc; // assign immediately so close() can always kill it
@@ -286,7 +362,7 @@ class Tunnel {
       const finish = (fn, arg) => { if (settled) return; settled = true; clearTimeout(timer); fn(arg); };
       const onData = (d) => {
         buf += d.toString();
-        if (buf.length > 65536) buf = buf.slice(-4096); // bound memory on a long-lived tunnel
+        if (buf.length > 65536) buf = buf.slice(-4096);
         const m = buf.match(prov.re);
         if (m) {
           proc.stdout.removeListener('data', onData);
@@ -308,16 +384,15 @@ class Tunnel {
   }
 }
 
-/**
- * One live relay session (M1: a single active session at a time).
- */
+/** One live relay session (a single active session at a time). */
 class HumanRelay {
   constructor(opts = {}) {
     this.log = makeLogger(opts.log !== false);
     this.cdp = null;
     this.server = null;
-    this.sse = new Set();
-    this.lastFrame = null;
+    this.wss = null;
+    this.wsClients = new Set();
+    this.lastFrame = null; // base64 JPEG of the most recent frame
     this.vp = { w: 360, h: 640 };
     this.token = null;
     this.relayUrl = null;
@@ -328,7 +403,7 @@ class HumanRelay {
   }
 
   /**
-   * Connect via CDP, start the screencast, and serve the phone relay page.
+   * Connect via CDP, start the screencast, and serve the phone relay page + WS.
    * @returns {Promise<{relayUrl:string, relayUrls:string[], pageUrl:string, viewport:{w:number,h:number}}>}
    */
   async start({ cdpUrl, targetUrl, host, port, tunnel, maxLifetimeMs } = {}) {
@@ -372,12 +447,14 @@ class HumanRelay {
 
     this.cdp.on('Page.screencastFrame', async (p) => {
       this.lastFrame = p.data;
-      for (const res of this.sse) { try { res.write(`data: ${p.data}\n\n`); } catch { /* client gone */ } }
+      const bin = Buffer.from(p.data, 'base64');
+      for (const ws of this.wsClients) {
+        if (ws.readyState === WebSocket.OPEN) { try { ws.send(bin); } catch { /* client gone */ } }
+      }
       try { await this.cdp.send('Page.screencastFrameAck', { sessionId: p.sessionId }); } catch { /* race on stop */ }
     });
-    // Cap frame size + rate so the JPEG screencast stays light over a phone tunnel.
-    // Full-viewport frames were too heavy and made image challenges feel laggy on
-    // real devices. Tap accuracy is unaffected (coords map to the real viewport).
+    // Cap frame size so the JPEG stays light over a phone tunnel (full-viewport
+    // frames felt laggy). Tap accuracy is unaffected (coords map to real viewport).
     const FCAP = 700;
     const fscale = Math.min(1, FCAP / Math.max(this.vp.w, this.vp.h));
     const sw = Math.max(1, Math.round(this.vp.w * fscale));
@@ -390,8 +467,7 @@ class HumanRelay {
     this.token = crypto.randomBytes(12).toString('hex');
     await this._startHttp({ host, port });
 
-    // Public URL so the phone reaches the relay from anywhere (cellular, other
-    // wifi) with zero user setup. Skipped if the caller pinned their own host.
+    // Public URL so the phone reaches the relay from anywhere with zero setup.
     const tunnelMode = tunnel !== undefined ? tunnel : (process.env.HUMAN_GATE_TUNNEL === 'off' ? 'off' : 'auto');
     if (tunnelMode !== 'off' && !host) {
       this.tunnel = new Tunnel(this.log);
@@ -402,11 +478,10 @@ class HumanRelay {
         this.relayUrls = [publicUrl, ...this.relayUrls];
         this.relayUrl = publicUrl;
       } else {
-        this.tunnel = null; // fell back to LAN candidates already in relayUrls
+        this.tunnel = null;
       }
     }
 
-    // Hard lifetime cap so an abandoned relay never lingers (tunnel/ws/http).
     const maxMs = Number.isFinite(maxLifetimeMs) ? maxLifetimeMs : 15 * 60 * 1000;
     this._killTimer = setTimeout(() => { this.log('warn', 'relay hit max lifetime — auto-stopping'); this.stop(); }, maxMs);
     if (this._killTimer.unref) this._killTimer.unref();
@@ -417,52 +492,53 @@ class HumanRelay {
 
   _startHttp({ host, port } = {}) {
     return new Promise((resolve, reject) => {
+      const prefix = `/r/${this.token}`;
       const tokenBuf = Buffer.from(this.token);
-      const prefix = `/r/${this.token}`; // used to build the public relay URLs below
-      const server = http.createServer((req, res) => {
-        const reqPath = (req.url || '').split('?')[0];
+      const checkToken = (reqPath) => {
         const parts = reqPath.split('/'); // ['', 'r', <token>, ...rest]
         const given = parts[2] || '';
-        const tokOk = parts[1] === 'r' && given.length === this.token.length &&
-          crypto.timingSafeEqual(Buffer.from(given), tokenBuf);
-        if (!tokOk) { this.log('warn', 'rejected request with bad/expired token'); res.writeHead(404).end('not found'); return; }
-        const sub = '/' + parts.slice(3).join('/'); // '/', '/stream', or '/tap'
-        const method = req.method || 'GET';
+        const ok = parts[1] === 'r' && given.length === this.token.length && crypto.timingSafeEqual(Buffer.from(given), tokenBuf);
+        return ok ? parts : null;
+      };
 
-        if (sub === '/') {
-          if (method !== 'GET') { res.writeHead(405).end('method not allowed'); return; }
+      const server = http.createServer((req, res) => {
+        const reqPath = (req.url || '').split('?')[0];
+        const parts = checkToken(reqPath);
+        if (!parts) { this.log('warn', 'rejected request with bad/expired token'); res.writeHead(404).end('not found'); return; }
+        const sub = '/' + parts.slice(3).join('/');
+        if (sub === '/' && (req.method || 'GET') === 'GET') {
           this.log('debug', 'phone opened relay page');
           res.writeHead(200, {
             'Content-Type': 'text/html; charset=utf-8',
-            'Content-Security-Policy': "default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'",
+            'Content-Security-Policy': "default-src 'none'; img-src blob: data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self' ws: wss:",
             'X-Content-Type-Options': 'nosniff',
             'Referrer-Policy': 'no-referrer',
           });
           res.end(renderPhonePage('human-gate · solve the CAPTCHA'));
           return;
         }
-        if (sub === '/stream') {
-          if (method !== 'GET') { res.writeHead(405).end('method not allowed'); return; }
-          res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Content-Type-Options': 'nosniff' });
-          res.write('retry: 1000\n\n');
-          if (this.lastFrame) res.write(`data: ${this.lastFrame}\n\n`);
-          this.sse.add(res);
-          this.log('state', 'SSE client attached', { clients: this.sse.size });
-          req.on('close', () => { this.sse.delete(res); this.log('state', 'SSE client left', { clients: this.sse.size }); });
-          return;
-        }
-        if (sub === '/tap' && method === 'POST') {
-          let b = '';
-          req.on('data', (c) => { b += c; if (b.length > 1e5) req.destroy(); });
-          req.on('end', async () => {
-            try { const { nx, ny } = JSON.parse(b); await this._tap(nx, ny); }
-            catch (e) { this.log('error', 'tap relay failed', e && e.message); }
-            res.writeHead(200).end('ok');
-          });
-          return;
-        }
         res.writeHead(404).end('not found');
       });
+
+      // WebSocket transport: binary JPEG frames down, JSON taps up.
+      this.wss = new WebSocketServer({ noServer: true });
+      server.on('upgrade', (req, socket, head) => {
+        const reqPath = (req.url || '').split('?')[0];
+        const parts = checkToken(reqPath);
+        if (!parts || parts[3] !== 'ws') { socket.destroy(); return; }
+        this.wss.handleUpgrade(req, socket, head, (ws) => {
+          this.wsClients.add(ws);
+          this.log('state', 'phone WS connected', { clients: this.wsClients.size });
+          if (this.lastFrame) { try { ws.send(Buffer.from(this.lastFrame, 'base64')); } catch { /* noop */ } }
+          ws.on('message', (data) => {
+            try { const { nx, ny } = JSON.parse(data.toString()); this._tap(nx, ny); }
+            catch (e) { this.log('error', 'bad WS tap message', e && e.message); }
+          });
+          ws.on('close', () => { this.wsClients.delete(ws); this.log('state', 'phone WS left', { clients: this.wsClients.size }); });
+          ws.on('error', () => { this.wsClients.delete(ws); });
+        });
+      });
+
       server.on('error', reject);
       server.listen(port || 0, () => {
         const p = server.address().port;
@@ -470,7 +546,7 @@ class HumanRelay {
         const ips = listIpv4();
         this.relayUrls = ips.map((ip) => `http://${ip}:${p}${prefix}/`);
         this.relayUrl = host ? `http://${host}:${p}${prefix}/` : this.relayUrls[0];
-        this.log('state', 'relay http listening', { primary: this.relayUrl, candidates: this.relayUrls });
+        this.log('state', 'relay http+ws listening', { primary: this.relayUrl, candidates: this.relayUrls });
         resolve();
       });
     });
@@ -492,15 +568,13 @@ class HumanRelay {
   }
 
   /**
-   * Poll until the reCAPTCHA token appears (Google accepted the human solve),
+   * Poll until the CAPTCHA token appears (reCAPTCHA v2/v3, hCaptcha, Turnstile),
    * or until timeout.
-   * @returns {Promise<{passed:boolean}>}
+   * @returns {Promise<{passed:boolean, reason?:string}>}
    */
   async awaitSolve({ timeoutMs = 300000, pollMs = 1500 } = {}) {
     this.log('entry', 'await_human_solve', { timeoutMs, pollMs });
     if (!this.cdp) throw new Error('no active relay; call start_human_relay first');
-    // Pass = the CAPTCHA's response token is present in the page. Covers the
-    // three common in-page widgets: reCAPTCHA v2/v3, hCaptcha, Cloudflare Turnstile.
     const expr =
       '(function(){try{' +
       'function v(s){var e=document.querySelector(s);return e&&e.value?e.value.length:0;}' +
@@ -520,9 +594,9 @@ class HumanRelay {
         polls++;
         if (r && r.result && r.result.value === true) {
           this.log('exit', 'solve detected — passed', { polls });
-          // tell the phone it worked before we tear the relay down (avoids a "frozen/stuck" look)
-          for (const res of this.sse) { try { res.write('event: solved\ndata: 1\n\n'); } catch { /* client gone */ } }
-          await new Promise((r2) => setTimeout(r2, 250)); // let the success frame reach the phone
+          // tell the phone it worked before we tear the relay down (avoids a "stuck" look)
+          for (const ws of this.wsClients) { if (ws.readyState === WebSocket.OPEN) { try { ws.send(JSON.stringify({ type: 'solved' })); } catch { /* noop */ } } }
+          await new Promise((r2) => setTimeout(r2, 250));
           return { passed: true };
         }
       } catch (e) {
@@ -539,14 +613,16 @@ class HumanRelay {
     if (this._killTimer) { clearTimeout(this._killTimer); this._killTimer = null; }
     try { if (this.tunnel) this.tunnel.close(); } catch { /* noop */ }
     try { if (this.cdp) await this.cdp.send('Page.stopScreencast'); } catch { /* noop */ }
-    for (const res of this.sse) { try { res.end(); } catch { /* noop */ } }
-    this.sse.clear();
+    for (const ws of this.wsClients) { try { ws.close(); } catch { /* noop */ } }
+    this.wsClients.clear();
+    try { if (this.wss) this.wss.close(); } catch { /* noop */ }
     try { if (this.server) this.server.close(); } catch { /* noop */ }
     try { if (this.cdp) this.cdp.close(); } catch { /* noop */ }
     this.cdp = null;
     this.server = null;
+    this.wss = null;
     this.log('state', 'relay stopped');
   }
 }
 
-module.exports = { HumanRelay, CdpSession, Tunnel, detectLanIp, listIpv4, fetchTargets };
+module.exports = { HumanRelay, CdpSession, Tunnel, detectLanIp, listIpv4, fetchTargets, ensureCloudflared };
