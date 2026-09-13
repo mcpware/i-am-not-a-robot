@@ -78,6 +78,33 @@ The public-tunnel default leans on a free third-party host for convenience. This
 
 i-am-not-a-robot crops the stream to just the CAPTCHA widget (the checkbox and its image challenge), so you see only what you act on, not the whole page the agent is filling. Detection covers reCAPTCHA v2/v3/Enterprise, hCaptcha, and Cloudflare Turnstile; an unrecognized widget falls back to streaming the full page. Automatic pass detection (the response token) is wired for those same widgets.
 
+## How this compares
+
+There are a few ways to get an agent past a CAPTCHA, and i-am-not-a-robot is in none of the usual buckets. Here is the honest version, including where the alternatives are the better choice.
+
+| | Solver services (2Captcha, Anti-Captcha, CapMonster) | Desktop handoff (Pilot, hosted-browser live views) | i-am-not-a-robot |
+|---|---|---|---|
+| Who actually solves it | an AI, or a paid worker in a farm, off your session | a hired operator, or you, driving the whole browser at a desk | you, the real user, with a thumb, in the real session |
+| Where the token is minted | the farm's device, shipped to you as a string | the real session | the real session |
+| Holds up on reCAPTCHA v3 / Enterprise / Turnstile | weak: minted on a farm device, so it scores low or the clearance is turned away | strong | strong |
+| What the helper can see | nothing, it is automated | your whole browser session | only the CAPTCHA widget |
+| Usable from a phone, away from the desk | yes, it is an API | no, you need a computer | yes |
+| Ships auto-solve code that breaks on each challenge update | yes | no | no |
+| Cost | per solve, forever | per rescue or hosted browser | free, you host nothing |
+| Built for thousands of unattended solves | yes, that is the whole point | no | no, one at a time, by design |
+
+**Why not a solver like 2Captcha?**
+A solver mints the token somewhere else and hands you the string. That is fine for a throwaway v2 checkbox and it scales to millions, so if your goal is to clear CAPTCHAs in bulk with no human, use one. It falls apart the moment a site actually cares. reCAPTCHA v3 and Enterprise score the session behind the token, and a farm session scores like a bot; Cloudflare ties a Turnstile clearance to the device it was issued to, so a token minted on the farm's machine comes back low or gets turned away. You also pay per solve, you carry auto-solve code that rots every time Google ships a new challenge, and the solving runs on machines that are not yours. i-am-not-a-robot puts a real finger in your real browser, so the token is an ordinary token from an ordinary session. It is the opposite trade: no scale, but it holds up where solvers do not, and it never tries to beat the test.
+
+**Why not a desktop handoff like Pilot?**
+Pilot and the hosted-browser live views solve the same blocker by handing a human a link to drive the whole browser, and that human is usually a paid operator who can see your entire session. Two things are different here. The person solving is you, the actual account owner, not a stranger on call. And you only ever see the CAPTCHA widget, cropped out of the page and sent to your phone, never the full desktop browser. Some MCP browser tools (Agent360, for one) pair an auto-solver with a pop-up on the same screen the agent runs on, which is still a solver on that machine, not a relay to your own phone.
+
+**Why not just wait until you are back at the keyboard?**
+Often the right call, and if you are always at your desk you do not need this. An agent earns its keep by running while you are away. This keeps it from stalling for an hour over one checkbox.
+
+**Why a human at all, instead of a stored code?**
+A CAPTCHA is not a 2FA secret. Nothing you can save in advance answers "pick every crosswalk", which is the whole reason the challenge exists. It needs a human gesture, so this gives it one, with the least interruption to you. For the steps that really are a code or a yes/no (OTP, 2FA, "approve this"), the package also ships `humanGate()`, which pushes those to your phone over ntfy.
+
 ## Security and intended use
 
 - The relay URL carries a 96-bit random token in its path. Requests without it get a 404.
