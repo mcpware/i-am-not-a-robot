@@ -50,7 +50,7 @@
     "node": ">=18"
   },
   "license": "MIT",
-  "author": "Nicole Leung",
+  "author": "ithiria894",
   "repository": { "type": "git", "url": "git+https://github.com/mcpware/i-am-not-a-robot.git" },
   "homepage": "https://github.com/mcpware/i-am-not-a-robot#readme",
   "bugs": "https://github.com/mcpware/i-am-not-a-robot/issues",

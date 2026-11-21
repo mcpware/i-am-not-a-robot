@@ -96,6 +96,6 @@ The package also ships `humanGate(page, { ... })`, a zero-dependency helper for 
 
 ## License
 
-MIT © Nicole Leung
+MIT © ithiria894
 
 If i-am-not-a-robot saves you a trip back to the keyboard, a star helps other people find it.
